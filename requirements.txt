@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-dotenv
+supabase
+langchain
+langchain-openai
+langchain-core
+requests
+pillow
+python-multipart
