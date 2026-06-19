@@ -295,8 +295,20 @@ async def recibir_webhook(request: Request, background_tasks: BackgroundTasks):
 
 def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
     try:
-        negocio       = _negocios_cache[phone_number_id]
-        negocio_id    = negocio["id"]
+        # Leemos la config del negocio SIEMPRE fresca de Supabase para que
+        # cualquier cambio desde el panel aplique en el siguiente mensaje,
+        # sin necesidad de reiniciar el servicio.
+        negocio_cache = _negocios_cache.get(phone_number_id)
+        if not negocio_cache:
+            return
+        negocio_id = negocio_cache["id"]
+
+        # Recarga la fila del negocio directo de DB
+        negocios_frescos = db.cargar_negocios()
+        negocio = next((n for n in negocios_frescos if n["id"] == negocio_id), negocio_cache)
+        # Actualizar cache en memoria tambien
+        _negocios_cache[phone_number_id] = negocio
+
         nombre_neg    = negocio["nombre"]
         token         = negocio["whatsapp_token"]
         menu          = _menu_cache.get(negocio_id, [])
