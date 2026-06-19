@@ -108,6 +108,73 @@ async def panel_login_get(phone_id: str, pwd: str = ""):
     </form></div></div></body></html>""")
 
 
+_DIAS = ["lunes","martes","miercoles","jueves","viernes","sabado","domingo"]
+_DIAS_ES = {"lunes":"Lunes","martes":"Martes","miercoles":"Miércoles",
+             "jueves":"Jueves","viernes":"Viernes","sabado":"Sábado","domingo":"Domingo"}
+
+def _get_horarios(negocio: dict) -> dict:
+    """Devuelve el dict de horarios, con defaults si no existe."""
+    h = negocio.get("horarios_json") or {}
+    if isinstance(h, str):
+        import json as _json
+        try: h = _json.loads(h)
+        except: h = {}
+    defaults = {"abierto": True, "apertura": "18:00", "cierre": "00:00"}
+    return {dia: h.get(dia, defaults) for dia in _DIAS}
+
+def _html_horarios(negocio: dict) -> str:
+    horarios = _get_horarios(negocio)
+    partes = []
+    for dia in _DIAS:
+        info     = horarios[dia]
+        abierto  = info.get("abierto", True)
+        apertura = info.get("apertura", "18:00")
+        cierre   = info.get("cierre",   "00:00")
+        chk      = "checked" if abierto else ""
+        partes.append(
+            f"<div class='dia-card'>"
+            f"<div class='switch'>"
+            f"<input type='checkbox' class='chk-dia' name='dia_{dia}' {chk}>"
+            f"<h4>{_DIAS_ES[dia]}</h4>"
+            f"</div>"
+            f"<label>Apertura</label>"
+            f"<input type='time' name='apertura_{dia}' value='{apertura}'>"
+            f"<label>Cierre</label>"
+            f"<input type='time' name='cierre_{dia}' value='{cierre}'>"
+            f"</div>"
+        )
+    return "\n".join(partes)
+
+def _alerta_cerrado_hoy(negocio: dict, phone_id: str, pwd: str) -> str:
+    cerrado = negocio.get("cerrado_hoy", False)
+    if cerrado:
+        return (
+            f"<div class='alerta-cerrado'>⚠️ <b>Cerrado hoy activado</b> — el bot está avisando a "
+            f"los clientes que no están tomando pedidos. "
+            f"<a href='/admin/{phone_id}/cerrado_hoy?pwd={pwd}&estado=0' "
+            f"style='color:#b91c1c;font-weight:600'>Reactivar</a></div>"
+        )
+    return (
+        f"<div style='text-align:right;margin-bottom:12px'>"
+        f"<a href='/admin/{phone_id}/cerrado_hoy?pwd={pwd}&estado=1' "
+        f"class='btn' style='background:#f59e0b;color:#fff'>🔴 Cerrar hoy</a>"
+        f"&nbsp;"
+        f"<span style='font-size:.8rem;color:#94a3b8'>¿No vas a abrir hoy? Avisa a tus clientes con un clic.</span>"
+        f"</div>"
+    )
+
+@router.get("/admin/{phone_id}/cerrado_hoy")
+async def toggle_cerrado_hoy(phone_id: str, pwd: str = "", estado: int = 0):
+    negocio = _neg(phone_id)
+    if not negocio or not _auth(negocio, pwd):
+        return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
+    cerrado = estado == 1
+    db.actualizar_negocio(phone_id, {"cerrado_hoy": cerrado})
+    from main import _negocios_cache
+    _negocios_cache[phone_id]["cerrado_hoy"] = cerrado
+    return RedirectResponse(f"/admin/{phone_id}/config?pwd={pwd}&guardado=1", status_code=303)
+
+
 # ── CONFIGURACION ─────────────────────────────────────────────────────────────
 
 @router.get("/admin/{phone_id}/config", response_class=HTMLResponse)
@@ -128,7 +195,19 @@ async def panel_config_get(phone_id: str, pwd: str = "", guardado: str = ""):
     return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
     <meta name='viewport' content='width=device-width,initial-scale=1'>
     <title>Config — {v('nombre')}</title>
-    <style>{_CSS}</style></head><body>
+    <style>{_CSS}
+    .horarios-grid {{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-top:12px}}
+    .dia-card {{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px}}
+    .dia-card.cerrado {{opacity:.5}}
+    .dia-card h4 {{font-size:.85rem;font-weight:600;margin-bottom:8px;text-transform:capitalize}}
+    .dia-card label {{margin-top:6px;font-size:.8rem}}
+    .dia-card input[type=time] {{padding:6px 8px;font-size:.85rem}}
+    .switch {{display:flex;align-items:center;gap:8px;margin-bottom:8px}}
+    .switch input[type=checkbox] {{width:16px;height:16px;cursor:pointer}}
+    .badge-cerrado {{background:#fee2e2;color:#b91c1c;padding:2px 8px;border-radius:99px;font-size:.75rem}}
+    .alerta-cerrado {{background:#fef9c3;border:1px solid #fde68a;color:#854d0e;
+                      padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:.9rem}}
+    </style></head><body>
     <div class='topbar'><h1>🌮 Agendify Pedidos</h1><span>{v('nombre')}</span></div>
     <div class='container'>
     <nav>
@@ -137,6 +216,7 @@ async def panel_config_get(phone_id: str, pwd: str = "", guardado: str = ""):
       <a href='/admin/{phone_id}/pedidos?pwd={pwd}'>📦 Pedidos</a>
     </nav>
     {aviso}
+    {_alerta_cerrado_hoy(negocio, phone_id, pwd)}
     <form method='post' action='/admin/{phone_id}/config?pwd={pwd}'>
     <div class='card'>
       <h2>Datos del negocio</h2>
@@ -150,13 +230,23 @@ async def panel_config_get(phone_id: str, pwd: str = "", guardado: str = ""):
           <input type='email' name='email_notificaciones' value='{v("email_notificaciones")}'>
         </div>
       </div>
-      <label>Horarios de atención</label>
-      <input type='text' name='horarios_texto' value='{v("horarios_texto")}'
-             placeholder='Ej. Lun-Dom 10am-10pm'>
       <label>Mensaje de bienvenida</label>
       <textarea name='mensaje_bienvenida'>{v("mensaje_bienvenida")}</textarea>
+      <label>Mensaje cuando estamos cerrados</label>
+      <textarea name='mensaje_cerrado'>{v("mensaje_cerrado")}</textarea>
       <label>Información adicional para el bot (alergenos, políticas, etc.)</label>
       <textarea name='base_conocimiento'>{v("base_conocimiento")}</textarea>
+    </div>
+
+    <div class='card'>
+      <h2>🕐 Horarios de atención</h2>
+      <p style='font-size:.85rem;color:#64748b;margin-bottom:12px'>
+        Activa los días que abres y define el horario. Si un día va a cerrar excepcionalmente,
+        usa el botón de "Cerrado hoy" en la parte de arriba.
+      </p>
+      <div class='horarios-grid'>
+        {_html_horarios(negocio)}
+      </div>
     </div>
 
     <div class='card'>
@@ -196,16 +286,32 @@ async def panel_config_get(phone_id: str, pwd: str = "", guardado: str = ""):
 
     <button class='btn btn-primary' type='submit'>💾 Guardar configuración</button>
     </form>
-    </div></body></html>""")
+    </div>
+    <script>
+    // Habilitar/deshabilitar campos de hora segun el checkbox de cada dia
+    document.querySelectorAll('.chk-dia').forEach(chk => {{
+        chk.addEventListener('change', () => {{
+            const card = chk.closest('.dia-card');
+            card.querySelectorAll('input[type=time]').forEach(i => i.disabled = !chk.checked);
+            card.classList.toggle('cerrado', !chk.checked);
+        }});
+        // Estado inicial
+        const card = chk.closest('.dia-card');
+        card.querySelectorAll('input[type=time]').forEach(i => i.disabled = !chk.checked);
+        if (!chk.checked) card.classList.add('cerrado');
+    }});
+    </script>
+    </body></html>""")
 
 
 @router.post("/admin/{phone_id}/config", response_class=HTMLResponse)
 async def panel_config_post(
     phone_id: str, pwd: str = "",
+    request: Request = None,
     nombre: str = Form(""),
     email_notificaciones: str = Form(""),
-    horarios_texto: str = Form(""),
     mensaje_bienvenida: str = Form(""),
+    mensaje_cerrado: str = Form(""),
     base_conocimiento: str = Form(""),
     tipo_servicio: str = Form("ambos"),
     metodos_pago: str = Form("Efectivo"),
@@ -214,14 +320,29 @@ async def panel_config_post(
     costo_envio: float = Form(0),
     pedido_minimo: float = Form(0),
 ):
+    import json as _json
     negocio = _neg(phone_id)
     if not negocio or not _auth(negocio, pwd):
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
-    db.actualizar_negocio(phone_id, {
+
+    # Reconstruir horarios desde los campos del formulario
+    form_data = await request.form()
+    horarios_json = {}
+    for dia in _DIAS:
+        abierto  = f"dia_{dia}" in form_data
+        apertura = form_data.get(f"apertura_{dia}", "18:00")
+        cierre   = form_data.get(f"cierre_{dia}", "00:00")
+        horarios_json[dia] = {
+            "abierto":  abierto,
+            "apertura": apertura,
+            "cierre":   cierre,
+        }
+
+    datos = {
         "nombre":              nombre.strip(),
         "email_notificaciones": email_notificaciones.strip() or None,
-        "horarios_texto":      horarios_texto.strip(),
         "mensaje_bienvenida":  mensaje_bienvenida.strip(),
+        "mensaje_cerrado":     mensaje_cerrado.strip(),
         "base_conocimiento":   base_conocimiento.strip(),
         "tipo_servicio":       tipo_servicio,
         "metodos_pago":        metodos_pago.strip(),
@@ -229,17 +350,11 @@ async def panel_config_post(
         "tiempo_envio_min":    tiempo_envio_min,
         "costo_envio":         costo_envio,
         "pedido_minimo":       pedido_minimo,
-    })
-    # Actualizar cache en memoria
+        "horarios_json":       horarios_json,
+    }
+    db.actualizar_negocio(phone_id, datos)
     from main import _negocios_cache
-    _negocios_cache[phone_id].update({
-        "nombre": nombre.strip(), "email_notificaciones": email_notificaciones.strip() or None,
-        "horarios_texto": horarios_texto.strip(), "mensaje_bienvenida": mensaje_bienvenida.strip(),
-        "base_conocimiento": base_conocimiento.strip(), "tipo_servicio": tipo_servicio,
-        "metodos_pago": metodos_pago.strip(), "tiempo_recoger_min": tiempo_recoger_min,
-        "tiempo_envio_min": tiempo_envio_min, "costo_envio": costo_envio,
-        "pedido_minimo": pedido_minimo,
-    })
+    _negocios_cache[phone_id].update(datos)
     return RedirectResponse(f"/admin/{phone_id}/config?pwd={pwd}&guardado=1", status_code=303)
 
 
@@ -416,4 +531,5 @@ async def panel_pedido_estado(phone_id: str, pedido_id: int, pwd: str = "",
     if not negocio or not _auth(negocio, pwd):
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
     db.actualizar_estado_pedido(pedido_id, estado)
+    return RedirectResponse(f"/admin/{phone_id}/pedidos?pwd={pwd}", status_code=303)
     return RedirectResponse(f"/admin/{phone_id}/pedidos?pwd={pwd}", status_code=303)
