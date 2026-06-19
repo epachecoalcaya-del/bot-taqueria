@@ -26,7 +26,7 @@ def _get_client():
 def cargar_negocios() -> list:
     """Carga todos los negocios activos al arrancar. Se cachean en memoria."""
     try:
-        r = _get_client().table("negocios").select("*").execute()
+        r = _get_client().table("pedidos_negocios").select("*").execute()
         return r.data or []
     except Exception as e:
         print(f"!!! DB error en cargar_negocios: {e}")
@@ -40,7 +40,7 @@ def cargar_menu(negocio_id: int) -> list:
     try:
         r = (
             _get_client()
-            .table("menu_items")
+            .table("pedidos_menu")
             .select("*")
             .eq("negocio_id", negocio_id)
             .eq("disponible", True)
@@ -57,7 +57,7 @@ def cargar_menu(negocio_id: int) -> list:
 def agregar_item_menu(negocio_id: int, nombre: str, precio: float,
                       descripcion: str = "", categoria: str = "General") -> bool:
     try:
-        _get_client().table("menu_items").insert({
+        _get_client().table("pedidos_menu").insert({
             "negocio_id":  negocio_id,
             "nombre":      nombre.strip(),
             "descripcion": descripcion.strip(),
@@ -73,7 +73,7 @@ def agregar_item_menu(negocio_id: int, nombre: str, precio: float,
 
 def eliminar_item_menu(item_id: int) -> bool:
     try:
-        _get_client().table("menu_items").delete().eq("id", item_id).execute()
+        _get_client().table("pedidos_menu").delete().eq("id", item_id).execute()
         return True
     except Exception as e:
         print(f"!!! DB error en eliminar_item_menu: {e}")
@@ -83,7 +83,7 @@ def eliminar_item_menu(item_id: int) -> bool:
 def actualizar_negocio(phone_number_id: str, datos: dict) -> bool:
     try:
         datos["updated_at"] = datetime.datetime.now(timezone.utc).isoformat()
-        _get_client().table("negocios").update(datos).eq("phone_number_id", phone_number_id).execute()
+        _get_client().table("pedidos_negocios").update(datos).eq("phone_number_id", phone_number_id).execute()
         return True
     except Exception as e:
         print(f"!!! DB error en actualizar_negocio: {e}")
@@ -97,7 +97,7 @@ def cargar_sesion(llave: str) -> dict:
     try:
         r = (
             _get_client()
-            .table("sesiones")
+            .table("pedidos_sesiones")
             .select("*")
             .eq("llave_memoria", llave)
             .execute()
@@ -151,7 +151,7 @@ def guardar_sesion(
             datos["direccion_entrega"] = direccion_entrega
         if nombre_cliente is not None:
             datos["nombre_cliente"] = nombre_cliente
-        _get_client().table("sesiones").upsert(datos).execute()
+        _get_client().table("pedidos_sesiones").upsert(datos).execute()
     except Exception as e:
         print(f"!!! DB error en guardar_sesion ({llave}): {e}")
 
@@ -181,7 +181,7 @@ def guardar_pedido(
 ) -> Optional[int]:
     """Guarda un pedido confirmado. Devuelve el ID del pedido o None si falla."""
     try:
-        r = _get_client().table("pedidos").insert({
+        r = _get_client().table("pedidos_ordenes").insert({
             "negocio_id":    negocio_id,
             "telefono":      telefono,
             "nombre_cliente": nombre_cliente,
@@ -202,7 +202,7 @@ def guardar_pedido(
 def actualizar_estado_pedido(pedido_id: int, estado: str) -> bool:
     """Actualiza el estado de un pedido (nuevo/en_proceso/listo/entregado/cancelado)."""
     try:
-        _get_client().table("pedidos").update({
+        _get_client().table("pedidos_ordenes").update({
             "estado":     estado,
             "updated_at": datetime.datetime.now(timezone.utc).isoformat(),
         }).eq("id", pedido_id).execute()
@@ -217,7 +217,7 @@ def obtener_pedidos_recientes(negocio_id: int, limite: int = 50) -> list:
     try:
         r = (
             _get_client()
-            .table("pedidos")
+            .table("pedidos_ordenes")
             .select("*")
             .eq("negocio_id", negocio_id)
             .order("created_at", desc=True)
