@@ -329,6 +329,47 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
 
         print(f"-> [Procesando] {telefono} | fase={fase or 'inicio'} | msg='{texto[:60]}'")
 
+        # ── VALIDACION DE HORARIO ────────────────────────────────────────────
+        # Si el negocio esta cerrado (cerrado_hoy o fuera de horario), avisamos
+        # y no procesamos el pedido. Solo se permite si ya habia una sesion
+        # activa en curso (carrito con productos o en fase de confirmacion),
+        # para no cortar a un cliente a la mitad de su pedido.
+        def _esta_abierto() -> bool:
+            if negocio.get("cerrado_hoy"):
+                return False
+            horarios = negocio.get("horarios_json") or {}
+            if isinstance(horarios, str):
+                import json as _j
+                try: horarios = _j.loads(horarios)
+                except: return True  # si no se puede parsear, no bloqueamos
+            ahora_mx = datetime.datetime.now(TZ_MX)
+            dia_semana = ["lunes","martes","miercoles","jueves","viernes","sabado","domingo"][ahora_mx.weekday()]
+            info = horarios.get(dia_semana, {})
+            if not info.get("abierto", True):
+                return False
+            try:
+                ap_h, ap_m = map(int, info.get("apertura","00:00").split(":"))
+                ci_h, ci_m = map(int, info.get("cierre","23:59").split(":"))
+                apertura_min = ap_h * 60 + ap_m
+                cierre_min   = ci_h * 60 + ci_m
+                actual_min   = ahora_mx.hour * 60 + ahora_mx.minute
+                if cierre_min < apertura_min:
+                    # cruza medianoche (ej. 18:00 a 01:00)
+                    return actual_min >= apertura_min or actual_min <= cierre_min
+                return apertura_min <= actual_min <= cierre_min
+            except Exception:
+                return True  # si falla el parse, no bloqueamos
+
+        sesion_activa = bool(carrito) or fase in ("confirmando", "nombre", "direccion", "tipo")
+        if not _esta_abierto() and not sesion_activa:
+            msg_cerrado = negocio.get("mensaje_cerrado") or (
+                "Lo sentimos, en este momento estamos cerrados. "
+                "¡Te esperamos en nuestro horario de atención! 🕐"
+            )
+            enviar_whatsapp(telefono, msg_cerrado, token, phone_number_id)
+            print(f"   [{nombre_neg}] Fuera de horario — mensaje de cerrado enviado.")
+            return
+
         # ── FLUJO DETERMINISTICO POR FASE ───────────────────────────────────
 
         # FASE: confirmando — el cliente responde SI/NO al resumen del pedido
