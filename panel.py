@@ -532,4 +532,3 @@ async def panel_pedido_estado(phone_id: str, pedido_id: int, pwd: str = "",
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
     db.actualizar_estado_pedido(pedido_id, estado)
     return RedirectResponse(f"/admin/{phone_id}/pedidos?pwd={pwd}", status_code=303)
-    return RedirectResponse(f"/admin/{phone_id}/pedidos?pwd={pwd}", status_code=303)
