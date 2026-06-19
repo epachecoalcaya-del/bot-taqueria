@@ -329,6 +329,18 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
 
         print(f"-> [Procesando] {telefono} | fase={fase or 'inicio'} | msg='{texto[:60]}'")
 
+        # Limpieza de carrito huerfano: si hay productos en el carrito pero
+        # no hay una fase activa (el pedido quedo a medias por algun error),
+        # limpiamos al detectar un saludo nuevo para empezar desde cero.
+        _SALUDOS = {"hola","buenas","buen dia","buenos dias","buenas tardes",
+                    "buenas noches","hey","hi","hello","ola","saludos"}
+        if carrito and not fase and any(s in texto_low for s in _SALUDOS):
+            db.limpiar_sesion(llave)
+            carrito = []
+            sesion  = db.cargar_sesion(llave)
+            historial = sesion["historial"]
+            print(f"   [{nombre_neg}] Carrito huerfano limpiado al detectar saludo nuevo.")
+
         # ── VALIDACION DE HORARIO ────────────────────────────────────────────
         # Si el negocio esta cerrado (cerrado_hoy o fuera de horario), avisamos
         # y no procesamos el pedido. Solo se permite si ya habia una sesion
@@ -416,8 +428,14 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                 return
 
             elif any(p in texto_low for p in ["no", "cancel", "cambiar", "modificar", "error"]):
-                resp = "Sin problema, ¿qué te gustaría cambiar? Puedes decirme qué agregar, quitar o modificar."
-                db.guardar_sesion(llave, historial, fase_pedido="armando", carrito=carrito)
+                resp = (
+                    "Sin problema. ¿Qué quieres hacer?\n\n"
+                    "1️⃣ *Agregar* un producto\n"
+                    "2️⃣ *Quitar* un producto\n"
+                    "3️⃣ *Cancelar* el pedido\n\n"
+                    "Solo dime qué necesitas, por ejemplo: "
+                    "_\"agrega una horchata\"_ o _\"quita el alambre\"_"
+                )
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="armando", carrito=carrito)
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
@@ -426,7 +444,17 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
         # FASE: nombre — esperando el nombre del cliente
         if fase == "nombre":
             nombre_cl = texto.strip().title()
-            if len(nombre_cl) >= 2 and not any(c.isdigit() for c in nombre_cl):
+            # Palabras que claramente NO son nombres — el cliente esta
+            # respondiendo algo distinto (cancelar, modificar, etc.)
+            _NO_ES_NOMBRE = {"no","si","sí","ok","okay","vale","cancel",
+                             "cancelar","modificar","cambiar","espera","otro","otra"}
+            es_nombre_valido = (
+                len(nombre_cl) >= 2
+                and not any(c.isdigit() for c in nombre_cl)
+                and nombre_cl.lower().strip(".,!¡¿?") not in _NO_ES_NOMBRE
+                and len(nombre_cl.split()) <= 5  # max 5 palabras
+            )
+            if es_nombre_valido:
                 carrito = sesion["carrito"]
                 tipo_entrega = sesion["tipo_entrega"]
                 direccion    = sesion["direccion_entrega"]
