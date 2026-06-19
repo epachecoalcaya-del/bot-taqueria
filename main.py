@@ -561,6 +561,26 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
             return _formato_menu(menu)
 
         @tool
+        def info_producto(nombre_producto: str) -> str:
+            """Usa esta herramienta cuando el cliente pregunta que lleva o que
+            ingredientes tiene un producto especifico (ej. '¿qué lleva la Juana?',
+            '¿qué es el Volcán?', '¿tiene queso?'). Devuelve la descripcion exacta
+            del producto segun el menu — NUNCA inventes ingredientes."""
+            item = _buscar_en_menu(nombre_producto, menu)
+            if not item:
+                return f"No encontré '{nombre_producto}' en el menú. ¿Te refieres a otro producto?"
+            desc = item.get("descripcion", "").strip()
+            if not desc:
+                return (
+                    f"*{item['nombre']}* — {_fmt_precio(float(item['precio']))}\n"
+                    f"_No tenemos descripción adicional de este producto._"
+                )
+            return (
+                f"*{item['nombre']}* lleva: {desc}.\n"
+                f"Precio: {_fmt_precio(float(item['precio']))} 🌮"
+            )
+
+        @tool
         def agregar_al_carrito(nombre_producto: str, cantidad: int = 1) -> str:
             """Agrega uno o varios productos al carrito del cliente.
             nombre_producto: nombre exacto o aproximado del producto segun el menu.
@@ -613,7 +633,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                 )
             return "INICIAR_CIERRE"
 
-        tools = [ver_menu, agregar_al_carrito, quitar_del_carrito, ver_carrito, cerrar_pedido]
+        tools = [ver_menu, info_producto, agregar_al_carrito, quitar_del_carrito, ver_carrito, cerrar_pedido]
 
         horarios = negocio.get("horarios_texto", "")
         base_conoc = negocio.get("base_conocimiento", "")
@@ -632,6 +652,7 @@ Métodos de pago aceptados: {metodos_pago}
 
 REGLAS IMPORTANTES:
 - Usa SIEMPRE la herramienta agregar_al_carrito para añadir productos. NUNCA inventes precios.
+- Cuando el cliente pregunte qué lleva o qué ingredientes tiene un producto, usa SIEMPRE la herramienta info_producto. NUNCA inventes ingredientes ni agregues cosas que no estén en la descripción del menú.
 - Si el cliente pide algo que no está en el menú, indícalo claramente y ofrece alternativas.
 - Cuando el cliente diga que ya terminó de pedir (eso es todo / ya es todo / nada más / con eso / etc.), llama cerrar_pedido.
 - Sé breve, amigable y usa emojis con moderación.
@@ -662,6 +683,7 @@ REGLAS IMPORTANTES:
                 print(f"   [{nombre_neg}] Tool: {fn_name} {fn_args}")
                 fn_map = {
                     "ver_menu":           ver_menu,
+                    "info_producto":      info_producto,
                     "agregar_al_carrito": agregar_al_carrito,
                     "quitar_del_carrito": quitar_del_carrito,
                     "ver_carrito":        ver_carrito,
