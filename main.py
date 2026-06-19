@@ -122,9 +122,8 @@ def _html_correo_pedido(negocio: str, nombre: str, telefono: str, items: list,
     </div>"""
 
 
-def notificar_dueno(email: str, asunto: str, html_body: str):
-    if not email:
-        return
+def _enviar_correo_worker(email: str, asunto: str, html_body: str):
+    """Worker que corre en hilo separado — nunca bloquea la respuesta al cliente."""
     smtp_email = os.getenv("SMTP_EMAIL", "")
     smtp_pass  = os.getenv("SMTP_APP_PASSWORD", "")
     if not smtp_email or not smtp_pass:
@@ -134,11 +133,28 @@ def notificar_dueno(email: str, asunto: str, html_body: str):
         msg["Subject"] = asunto
         msg["From"]    = smtp_email
         msg["To"]      = email
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        # Timeout de 10s para no bloquear si el servidor no responde
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465,
+                               context=None,
+                               timeout=10) as s:
             s.login(smtp_email, smtp_pass)
             s.sendmail(smtp_email, [email], msg.as_string())
+        print(f"   [Correo] Enviado a {email}: {asunto}")
     except Exception as e:
         print(f"!!! Error enviando correo: {e}")
+
+
+def notificar_dueno(email: str, asunto: str, html_body: str):
+    """Lanza el envio de correo en un hilo separado para no bloquear
+    la respuesta al cliente aunque el SMTP falle o tarde."""
+    if not email:
+        return
+    import threading
+    threading.Thread(
+        target=_enviar_correo_worker,
+        args=(email, asunto, html_body),
+        daemon=True,
+    ).start()
 
 
 # ── HELPERS DEL CARRITO ──────────────────────────────────────────────────────
