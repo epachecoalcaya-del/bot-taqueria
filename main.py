@@ -149,33 +149,78 @@ def _calcular_total(carrito: list) -> float:
 
 def _formato_carrito(carrito: list, costo_envio: float = 0) -> str:
     if not carrito:
-        return "Tu carrito está vacío."
-    lineas = [f"  • {i['cantidad']}x {i['nombre']} — ${i['precio']*i['cantidad']:.2f}" for i in carrito]
-    subtotal = _calcular_total(carrito)
-    texto = "🛒 *Tu pedido hasta ahora:*\n" + "\n".join(lineas)
+        return "🛒 Tu carrito está vacío."
+    lineas = ["🛒 *Tu pedido:*"]
+    for i in carrito:
+        subtotal = i["precio"] * i["cantidad"]
+        lineas.append(f"  • {i['cantidad']}x {i['nombre']} — {_fmt_precio(subtotal)}")
+    total = _calcular_total(carrito)
     if costo_envio > 0:
-        texto += f"\n  + Envío: ${costo_envio:.2f}"
-        texto += f"\n*Total: ${subtotal + costo_envio:.2f}*"
+        lineas.append(f"  • Envío — {_fmt_precio(costo_envio)}")
+        lineas.append(f"\n💰 *Total: {_fmt_precio(total + costo_envio)}*")
     else:
-        texto += f"\n*Total: ${subtotal:.2f}*"
-    return texto
+        lineas.append(f"\n💰 *Total: {_fmt_precio(total)}*")
+    return "\n".join(lineas)
 
+
+_EMOJI_CATEGORIA = {
+    "tacos":        "🌮",
+    "quesadillas":  "🫔",
+    "tortas":       "🥙",
+    "bebidas":      "🥤",
+    "complementos": "🍟",
+    "postres":      "🍮",
+    "desayunos":    "🍳",
+    "sopas":        "🍲",
+    "mariscos":     "🦐",
+    "carnes":       "🥩",
+    "ensaladas":    "🥗",
+    "pizzas":       "🍕",
+    "hamburguesas": "🍔",
+    "hot dogs":     "🌭",
+    "sushi":        "🍱",
+    "combos":       "🎁",
+    "especiales":   "⭐",
+    "antojitos":    "🫓",
+}
+
+def _emoji_cat(categoria: str) -> str:
+    return _EMOJI_CATEGORIA.get(categoria.lower().strip(), "🍽️")
+
+def _fmt_precio(precio: float) -> str:
+    """Muestra precio sin decimales si es numero redondo."""
+    return f"${int(precio)}" if precio == int(precio) else f"${precio:.2f}"
 
 def _formato_menu(items: list) -> str:
     if not items:
         return "No hay productos disponibles en este momento."
+
     por_categoria: dict = {}
     for item in items:
         cat = item.get("categoria", "General")
         por_categoria.setdefault(cat, []).append(item)
-    lineas = ["📋 *Menú:*\n"]
-    for cat, productos in por_categoria.items():
-        lineas.append(f"*{cat}*")
+
+    lineas = ["✨ *MENÚ* ✨", ""]
+
+    total_cats = len(por_categoria)
+    for idx, (cat, productos) in enumerate(por_categoria.items()):
+        emoji = _emoji_cat(cat)
+        lineas.append(f"{emoji} *{cat.upper()}*")
         for p in productos:
-            desc = f" — {p['descripcion']}" if p.get("descripcion") else ""
-            lineas.append(f"  • {p['nombre']}{desc}: ${p['precio']:.2f}")
-        lineas.append("")
-    return "\n".join(lineas).strip()
+            desc = f" _{p['descripcion']}_" if p.get("descripcion") else ""
+            lineas.append(f"  • *{p['nombre']}*{desc}")
+            lineas.append(f"    {_fmt_precio(float(p['precio']))}")
+        if idx < total_cats - 1:
+            lineas.append("")
+
+    lineas += [
+        "",
+        "━━━━━━━━━━━━━━",
+        "👇 *¿Qué te gustaría ordenar?*",
+        "_Puedes pedir varios productos a la vez,_",
+        "_por ejemplo: \"2 tacos de pastor y una horchata\"_",
+    ]
+    return "\n".join(lineas)
 
 
 def _buscar_en_menu(texto: str, menu: list) -> Optional[dict]:
@@ -276,10 +321,13 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                 )
                 tiempo = tiempo_env if tipo_entrega == "envio" else tiempo_rec
                 resp = (
-                    f"✅ ¡Pedido confirmado, {nombre_cl}! Tu #{pedido_id} está en camino.\n"
-                    f"⏱ Tiempo estimado: {tiempo} minutos.\n"
-                    f"{'🛵 Lo llevaremos a: ' + direccion if tipo_entrega == 'envio' else '🏪 Pasa a recogerlo cuando gustes.'}\n\n"
-                    "¡Gracias por tu preferencia! 🌮"
+                    f"✅ *¡Pedido #{pedido_id} confirmado!*\n\n"
+                    f"👤 *{nombre_cl}*\n"
+                    f"{'🛵 Envío a: ' + direccion if tipo_entrega == 'envio' else '🏪 Para recoger en el local'}\n"
+                    f"⏱ Tiempo estimado: *{tiempo} minutos*\n"
+                    f"💰 Total: *{_fmt_precio(total_con_envio)}*\n\n"
+                    f"¡Gracias por tu preferencia! 🌮\n"
+                    f"_Tu pedido ya está en preparación._"
                 )
                 # Notificar al dueño por correo
                 if email_notif:
@@ -317,12 +365,14 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                 total_con_envio = total + (costo_envio if tipo_entrega == "envio" else 0)
                 resumen = _formato_carrito(carrito, costo_envio if tipo_entrega == "envio" else 0)
                 resp = (
+                    f"📋 *Resumen de tu pedido*\n"
+                    f"━━━━━━━━━━━━━━\n"
                     f"{resumen}\n\n"
-                    f"📋 *Resumen de tu pedido:*\n"
-                    f"  👤 Nombre: {nombre_cl}\n"
-                    f"  {'🛵 Envío a: ' + direccion if tipo_entrega == 'envio' else '🏪 Para recoger en el local'}\n"
-                    f"  💰 Total: ${total_con_envio:.2f}\n\n"
-                    "¿Confirmas tu pedido? (responde *SÍ* para confirmar o *NO* para modificar)"
+                    f"👤 *Nombre:* {nombre_cl}\n"
+                    f"{'🛵 *Envío a:* ' + direccion if tipo_entrega == 'envio' else '🏪 *Para recoger* en el local'}\n\n"
+                    f"¿Todo está bien? Responde:\n"
+                    f"✅ *SÍ* para confirmar\n"
+                    f"❌ *NO* para modificar"
                 )
                 db.guardar_sesion(llave, historial, fase_pedido="confirmando",
                                   nombre_cliente=nombre_cl, carrito=carrito)
