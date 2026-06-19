@@ -71,7 +71,8 @@ def enviar_whatsapp(telefono: str, mensaje: str, token: str, phone_id: str) -> b
 # ── HELPERS DE CORREO ────────────────────────────────────────────────────────
 
 def _html_correo_pedido(negocio: str, nombre: str, telefono: str, items: list,
-                         total: float, tipo: str, direccion: str, metodo_pago: str) -> str:
+                         total: float, tipo: str, direccion: str, metodo_pago: str,
+                         notas: str = "") -> str:
     color = "#2563eb"
     emoji = "🛵" if tipo == "envio" else "🏪"
     tipo_texto = "Envío a domicilio" if tipo == "envio" else "Para recoger en local"
@@ -85,6 +86,11 @@ def _html_correo_pedido(negocio: str, nombre: str, telefono: str, items: list,
         f"<tr><td style='color:#6b7280;padding:4px 8px'>Dirección</td>"
         f"<td colspan='2' style='padding:4px 8px'><b>{html.escape(direccion)}</b></td></tr>"
         if direccion else ""
+    )
+    notas_html = (
+        f"<tr><td style='color:#6b7280;padding:4px 8px'>Notas</td>"
+        f"<td colspan='2' style='padding:4px 8px;color:#dc2626'><b>{html.escape(notas)}</b></td></tr>"
+        if notas else ""
     )
     return f"""
     <div style='font-family:sans-serif;max-width:520px;margin:0 auto'>
@@ -100,6 +106,7 @@ def _html_correo_pedido(negocio: str, nombre: str, telefono: str, items: list,
           <tr><td style='color:#6b7280;padding:4px 8px'>Tipo</td>
               <td colspan='2' style='padding:4px 8px'><b>{tipo_texto}</b></td></tr>
           {dir_html}
+          {notas_html}
           <tr><td style='color:#6b7280;padding:4px 8px'>Pago</td>
               <td colspan='2' style='padding:4px 8px'><b>{html.escape(metodo_pago or '—')}</b></td></tr>
         </table>
@@ -387,10 +394,10 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
         # FASE: confirmando — el cliente responde SI/NO al resumen del pedido
         if fase == "confirmando":
             if any(p in texto_low for p in ["si", "sí", "confirmo", "dale", "va", "ok", "correcto", "listo"]):
-                # Pedido confirmado: guardar en DB y notificar al dueño
                 tipo_entrega = sesion["tipo_entrega"]
                 nombre_cl    = sesion["nombre_cliente"]
                 direccion    = sesion["direccion_entrega"]
+                notas        = sesion.get("notas_pedido", "")
                 total        = _calcular_total(carrito)
                 total_con_envio = total + (costo_envio if tipo_entrega == "envio" else 0)
 
@@ -398,13 +405,15 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                     negocio_id=negocio_id, telefono=telefono,
                     nombre_cliente=nombre_cl, items=carrito,
                     total=total_con_envio, tipo_entrega=tipo_entrega,
-                    direccion=direccion,
+                    direccion=direccion, notas=notas,
                 )
                 tiempo = tiempo_env if tipo_entrega == "envio" else tiempo_rec
+                notas_linea = f"📝 {notas}\n" if notas else ""
                 resp = (
                     f"✅ *¡Pedido #{pedido_id} confirmado!*\n\n"
                     f"👤 *{nombre_cl}*\n"
                     f"{'🛵 Envío a: ' + direccion if tipo_entrega == 'envio' else '🏪 Para recoger en el local'}\n"
+                    f"{notas_linea}"
                     f"⏱ Tiempo estimado: *{tiempo} minutos*\n"
                     f"💰 Total: *{_fmt_precio(total_con_envio)}*\n\n"
                     f"¡Gracias por tu preferencia! 🌮\n"
@@ -416,7 +425,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                         f"Nuevo pedido #{pedido_id} en {nombre_neg}",
                         _html_correo_pedido(
                             nombre_neg, nombre_cl, telefono, carrito,
-                            total_con_envio, tipo_entrega, direccion, metodos_pago,
+                            total_con_envio, tipo_entrega, direccion, metodos_pago, notas,
                         ),
                     )
                 db.limpiar_sesion(llave)
@@ -459,29 +468,41 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
         # FASE: nombre — esperando el nombre del cliente
         if fase == "nombre":
             nombre_cl = texto.strip().title()
-            # Palabras que claramente NO son nombres — el cliente esta
-            # respondiendo algo distinto (cancelar, modificar, etc.)
-            _NO_ES_NOMBRE = {"no","si","sí","ok","okay","vale","cancel",
-                             "cancelar","modificar","cambiar","espera","otro","otra"}
+            # Frases y palabras que NO son nombres
+            _NO_ES_NOMBRE_PALABRAS = {
+                "no","si","sí","ok","okay","vale","cancel","cancelar",
+                "modificar","cambiar","espera","otro","otra","nada","ninguno",
+            }
+            _NO_ES_NOMBRE_FRASES = [
+                "para llevar","para recoger","para envio","para envío",
+                "a domicilio","sin cilantro","sin cebolla","sin chile",
+                "con todo","sin todo","para mi","es todo","ya es todo",
+                "nada mas","nada más",
+            ]
+            texto_lower_n = texto.lower().strip(".,!¡¿? ")
             es_nombre_valido = (
                 len(nombre_cl) >= 2
                 and not any(c.isdigit() for c in nombre_cl)
-                and nombre_cl.lower().strip(".,!¡¿?") not in _NO_ES_NOMBRE
-                and len(nombre_cl.split()) <= 5  # max 5 palabras
+                and texto_lower_n not in _NO_ES_NOMBRE_PALABRAS
+                and not any(f in texto_lower_n for f in _NO_ES_NOMBRE_FRASES)
+                and len(nombre_cl.split()) <= 4
             )
             if es_nombre_valido:
-                carrito = sesion["carrito"]
+                carrito      = sesion["carrito"]
                 tipo_entrega = sesion["tipo_entrega"]
                 direccion    = sesion["direccion_entrega"]
+                notas        = sesion.get("notas_pedido", "")
                 total        = _calcular_total(carrito)
                 total_con_envio = total + (costo_envio if tipo_entrega == "envio" else 0)
                 resumen = _formato_carrito(carrito, costo_envio if tipo_entrega == "envio" else 0)
+                notas_linea = f"📝 *Notas:* {notas}\n" if notas else ""
                 resp = (
                     f"📋 *Resumen de tu pedido*\n"
                     f"━━━━━━━━━━━━━━\n"
                     f"{resumen}\n\n"
                     f"👤 *Nombre:* {nombre_cl}\n"
-                    f"{'🛵 *Envío a:* ' + direccion if tipo_entrega == 'envio' else '🏪 *Para recoger* en el local'}\n\n"
+                    f"{'🛵 *Envío a:* ' + direccion if tipo_entrega == 'envio' else '🏪 *Para recoger* en el local'}\n"
+                    f"{notas_linea}\n"
                     f"¿Todo está bien? Responde:\n"
                     f"✅ *SÍ* para confirmar\n"
                     f"❌ *NO* para modificar"
@@ -618,13 +639,26 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
             return _formato_carrito(carrito_estado, costo_envio)
 
         @tool
+        def guardar_nota(nota: str) -> str:
+            """Guarda una nota o instruccion especial del cliente para su pedido.
+            Usar cuando el cliente pida algo especial como 'sin cilantro',
+            'sin cebolla', 'extra queso', 'bien cocido', etc."""
+            notas_actuales = sesion.get("notas_pedido", "")
+            nueva_nota = f"{notas_actuales} | {nota}".strip(" |") if notas_actuales else nota
+            db.guardar_sesion(llave, historial, notas_pedido=nueva_nota)
+            sesion["notas_pedido"] = nueva_nota
+            return f"Nota guardada: '{nota}' ✅"
+
+        @tool
         def cerrar_pedido() -> str:
             """Llama esta herramienta cuando el cliente diga que ya termino de
             pedir (frases como: 'eso es todo', 'ya es todo', 'eso seria todo',
-            'nada mas', 'con eso', etc.). Inicia el flujo de cierre."""
-            if not carrito_estado:
+            'nada mas', 'con eso', 'es todo', etc.). Inicia el flujo de cierre.
+            NO llames agregar_al_carrito antes de esta herramienta en el mismo turno."""
+            carrito_actual = db.cargar_sesion(llave).get("carrito") or carrito_estado
+            if not carrito_actual:
                 return "El carrito está vacío. Pide algo del menú primero."
-            total = _calcular_total(carrito_estado)
+            total = _calcular_total(carrito_actual)
             if pedido_min > 0 and total < pedido_min:
                 return (
                     f"El pedido mínimo es de ${pedido_min:.2f}. "
@@ -633,7 +667,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                 )
             return "INICIAR_CIERRE"
 
-        tools = [ver_menu, info_producto, agregar_al_carrito, quitar_del_carrito, ver_carrito, cerrar_pedido]
+        tools = [ver_menu, info_producto, agregar_al_carrito, quitar_del_carrito, ver_carrito, guardar_nota, cerrar_pedido]
 
         horarios = negocio.get("horarios_texto", "")
         base_conoc = negocio.get("base_conocimiento", "")
@@ -653,6 +687,8 @@ Métodos de pago aceptados: {metodos_pago}
 REGLAS IMPORTANTES:
 - Usa SIEMPRE la herramienta agregar_al_carrito para añadir productos. NUNCA inventes precios.
 - Cuando el cliente pregunte qué lleva o qué ingredientes tiene un producto, usa SIEMPRE la herramienta info_producto. NUNCA inventes ingredientes ni agregues cosas que no estén en la descripción del menú.
+- Cuando el cliente pida algo especial (sin cilantro, sin cebolla, extra queso, bien cocido, etc.), usa guardar_nota para registrarlo. NUNCA ignores estas instrucciones.
+- NO llames agregar_al_carrito y cerrar_pedido en el mismo mensaje. Si el cliente dice 'es todo' o 'nada más', llama SOLO cerrar_pedido.
 - Si el cliente pide algo que no está en el menú, indícalo claramente y ofrece alternativas.
 - Cuando el cliente diga que ya terminó de pedir (eso es todo / ya es todo / nada más / con eso / etc.), llama cerrar_pedido.
 - Sé breve, amigable y usa emojis con moderación.
@@ -687,6 +723,7 @@ REGLAS IMPORTANTES:
                     "agregar_al_carrito": agregar_al_carrito,
                     "quitar_del_carrito": quitar_del_carrito,
                     "ver_carrito":        ver_carrito,
+                    "guardar_nota":       guardar_nota,
                     "cerrar_pedido":      cerrar_pedido,
                 }
                 resultado = fn_map[fn_name].invoke(fn_args) if fn_name in fn_map else "Herramienta no encontrada."
