@@ -410,7 +410,6 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                     f"¡Gracias por tu preferencia! 🌮\n"
                     f"_Tu pedido ya está en preparación._"
                 )
-                # Notificar al dueño por correo
                 if email_notif:
                     notificar_dueno(
                         email_notif,
@@ -438,6 +437,22 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                 )
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="armando", carrito=carrito)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                return
+
+            else:
+                # El cliente dijo algo que no es SÍ ni NO (saludo, pregunta,
+                # etc.) — le recordamos que tiene un pedido pendiente en vez
+                # de caer al LLM que puede ignorar la fase y hacer cualquier cosa.
+                resumen = _formato_carrito(carrito, costo_envio if sesion.get("tipo_entrega") == "envio" else 0)
+                resp = (
+                    f"Tienes un pedido pendiente de confirmar 👆\n\n"
+                    f"{resumen}\n\n"
+                    f"¿Lo confirmas?\n"
+                    f"✅ *SÍ* para confirmar  |  ❌ *NO* para modificar"
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="confirmando", carrito=carrito)
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
                 return
 
