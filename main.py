@@ -590,9 +590,35 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
             enviar_whatsapp(telefono, resp, token, phone_number_id)
             return
 
+        # Caducidad de sesion por inactividad: si una sesion con fase activa
+        # (pedido a medias) lleva mas de 2 horas sin actividad, la
+        # consideramos abandonada y la limpiamos automaticamente — SIN
+        # depender de que el cliente salude primero. Esto evita que un
+        # cliente real quede atorado en una fase vieja para siempre si
+        # simplemente dejo de contestar a medio pedido y vuelve dias
+        # despues con un mensaje cualquiera (no necesariamente un saludo).
+        SESION_CADUCIDAD_HORAS = 2
+        if fase and sesion.get("updated_at"):
+            try:
+                ts_str = sesion["updated_at"].replace("Z", "+00:00")
+                ts_actualizacion = datetime.datetime.fromisoformat(ts_str)
+                horas_inactivo = (datetime.datetime.now(datetime.timezone.utc) - ts_actualizacion).total_seconds() / 3600
+                if horas_inactivo >= SESION_CADUCIDAD_HORAS:
+                    db.limpiar_sesion(llave)
+                    carrito = []
+                    fase = ""
+                    sesion = db.cargar_sesion(llave)
+                    historial = sesion["historial"]
+                    print(f"   [{nombre_neg}] Sesión caducada por inactividad ({horas_inactivo:.1f}h), limpiada automáticamente.")
+            except Exception as e:
+                print(f"!!! Error calculando caducidad de sesión: {e}")
+
         # Limpieza de carrito huerfano: si hay productos en el carrito pero
         # no hay una fase activa (el pedido quedo a medias por algun error),
         # limpiamos al detectar un saludo nuevo para empezar desde cero.
+        # (Esta es una red de seguridad adicional para el caso especifico
+        # de carrito sin fase; la caducidad de arriba cubre el caso general
+        # de cualquier fase atorada, con o sin saludo.)
         _SALUDOS = {"hola","buenas","buen dia","buenos dias","buenas tardes",
                     "buenas noches","hey","hi","hello","ola","saludos"}
         if carrito and not fase and any(s in texto_low for s in _SALUDOS):
@@ -729,9 +755,9 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                         f"Paga aquí de forma segura:\n{resultado_mp['link_pago']}\n\n"
                         f"_En cuanto se confirme tu pago, tu pedido pasará a preparación automáticamente._ ✅"
                     )
+                    db.limpiar_sesion(llave)
                     nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
                     db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:])
-                    db.limpiar_sesion(llave)
                     enviar_whatsapp(telefono, resp, token, phone_number_id)
                     print(f"   [{nombre_neg}] Pedido #{pedido_id} pendiente de pago ({metodo_pago_usado}) — link generado.")
                     return
