@@ -6,7 +6,7 @@ import html
 import datetime
 from typing import Optional
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 import database as db
 
 router = APIRouter()
@@ -508,6 +508,7 @@ async def panel_pedidos(phone_id: str, pwd: str = ""):
       <a href='/admin/{phone_id}/config?pwd={pwd}'>⚙️ Config</a>
       <a href='/admin/{phone_id}/menu?pwd={pwd}'>🍽️ Menú</a>
       <a href='/admin/{phone_id}/pedidos?pwd={pwd}' class='active'>📦 Pedidos</a>
+      <a href='/admin/{phone_id}/cocina?pwd={pwd}' style='background:#0f1115;color:#f59e0b;border-color:#f59e0b'>📺 Vista Cocina</a>
     </nav>
     <div class='card'>
       <h2>Pedidos recientes</h2>
@@ -532,3 +533,180 @@ async def panel_pedido_estado(phone_id: str, pedido_id: int, pwd: str = "",
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
     db.actualizar_estado_pedido(pedido_id, estado)
     return RedirectResponse(f"/admin/{phone_id}/pedidos?pwd={pwd}", status_code=303)
+
+
+# ── VISTA DE COCINA (KDS) ─────────────────────────────────────────────────────
+
+@router.get("/admin/{phone_id}/cocina", response_class=HTMLResponse)
+async def panel_cocina(phone_id: str, pwd: str = ""):
+    negocio = _neg(phone_id)
+    if not negocio or not _auth(negocio, pwd):
+        return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
+    nombre = html.escape(negocio["nombre"])
+    return HTMLResponse(f"""<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Cocina — {nombre}</title>
+<style>
+* {{ box-sizing:border-box; margin:0; padding:0; }}
+:root {{
+  --bg:#0f1115; --panel:#171a21; --nuevo:#f59e0b; --proceso:#3b82f6;
+  --listo:#22c55e; --texto:#f8fafc; --tenue:#94a3b8; --linea:#262b36;
+}}
+body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  background:var(--bg); color:var(--texto); padding:16px; min-height:100vh; }}
+.barra {{ display:flex; align-items:center; justify-content:space-between;
+  margin-bottom:20px; padding-bottom:14px; border-bottom:2px solid var(--linea); }}
+.barra h1 {{ font-size:1.6rem; font-weight:800; letter-spacing:-.5px; }}
+.barra .meta {{ display:flex; gap:20px; align-items:center; }}
+.contador {{ font-size:1.1rem; color:var(--tenue); }}
+.contador b {{ color:var(--nuevo); font-size:1.6rem; }}
+.reloj {{ font-size:1.3rem; font-weight:700; font-variant-numeric:tabular-nums; }}
+.sonido-btn {{ background:var(--panel); border:1px solid var(--linea); color:var(--texto);
+  padding:8px 14px; border-radius:10px; font-size:.9rem; cursor:pointer; }}
+.grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; }}
+.card {{ background:var(--panel); border-radius:16px; padding:18px;
+  border-top:6px solid var(--nuevo); box-shadow:0 4px 16px rgba(0,0,0,.3);
+  display:flex; flex-direction:column; gap:12px; animation:pop .3s ease; }}
+.card.proceso {{ border-top-color:var(--proceso); }}
+.card.listo {{ border-top-color:var(--listo); opacity:.75; }}
+.card.nuevo-flash {{ animation:flash 1s ease infinite; }}
+@keyframes flash {{ 0%,100%{{box-shadow:0 0 0 0 rgba(245,158,11,.7);}} 50%{{box-shadow:0 0 0 8px rgba(245,158,11,0);}} }}
+@keyframes pop {{ from{{transform:scale(.95);opacity:0;}} to{{transform:scale(1);opacity:1;}} }}
+.card-top {{ display:flex; justify-content:space-between; align-items:flex-start; }}
+.num {{ font-size:1.7rem; font-weight:800; }}
+.tiempo {{ font-size:1.1rem; font-weight:700; padding:4px 10px; border-radius:8px;
+  background:rgba(255,255,255,.08); font-variant-numeric:tabular-nums; }}
+.tiempo.urgente {{ background:rgba(239,68,68,.25); color:#fca5a5; }}
+.cliente {{ font-size:1.05rem; font-weight:600; }}
+.tipo {{ font-size:.95rem; color:var(--tenue); }}
+.tipo.envio {{ color:#fbbf24; }}
+.items {{ list-style:none; display:flex; flex-direction:column; gap:6px;
+  border-top:1px solid var(--linea); padding-top:10px; }}
+.items li {{ font-size:1.1rem; display:flex; gap:8px; }}
+.items .cant {{ font-weight:800; color:var(--nuevo); min-width:32px; }}
+.nota {{ background:rgba(239,68,68,.15); border:1px solid rgba(239,68,68,.4);
+  color:#fca5a5; padding:8px 10px; border-radius:8px; font-size:.95rem; }}
+.dir {{ font-size:.9rem; color:var(--tenue); }}
+.acciones {{ display:flex; gap:8px; margin-top:auto; }}
+.btn {{ flex:1; padding:12px; border:none; border-radius:10px; font-size:1rem;
+  font-weight:700; cursor:pointer; color:#fff; transition:transform .1s; }}
+.btn:active {{ transform:scale(.95); }}
+.btn-proceso {{ background:var(--proceso); }}
+.btn-listo {{ background:var(--listo); }}
+.btn-entregado {{ background:#475569; }}
+.vacio {{ text-align:center; color:var(--tenue); padding:80px 20px; font-size:1.2rem; }}
+</style></head><body>
+<div class='barra'>
+  <h1>🌮 {nombre} · Cocina</h1>
+  <div class='meta'>
+    <span class='contador'><b id='num-activos'>0</b> pedidos activos</span>
+    <button class='sonido-btn' id='btn-sonido' onclick='toggleSonido()'>🔔 Sonido: ON</button>
+    <span class='reloj' id='reloj'>--:--</span>
+  </div>
+</div>
+<div class='grid' id='grid'></div>
+<div class='vacio' id='vacio' style='display:none'>Sin pedidos activos por ahora 🍽️</div>
+
+<script>
+const PHONE='{phone_id}', PWD='{pwd}';
+let sonidoOn=true, conocidos=new Set(), primeraCarga=true;
+
+function toggleSonido(){{
+  sonidoOn=!sonidoOn;
+  document.getElementById('btn-sonido').textContent='🔔 Sonido: '+(sonidoOn?'ON':'OFF');
+}}
+
+// Sonido de alerta generado con Web Audio (sin archivos externos)
+function alerta(){{
+  if(!sonidoOn) return;
+  try {{
+    const ctx=new (window.AudioContext||window.webkitAudioContext)();
+    [0,0.15,0.3].forEach(t=>{{
+      const o=ctx.createOscillator(), g=ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.frequency.value=880; o.type='sine';
+      g.gain.setValueAtTime(0.0001,ctx.currentTime+t);
+      g.gain.exponentialRampToValueAtTime(0.3,ctx.currentTime+t+0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001,ctx.currentTime+t+0.12);
+      o.start(ctx.currentTime+t); o.stop(ctx.currentTime+t+0.13);
+    }});
+  }} catch(e){{}}
+}}
+
+function reloj(){{
+  const d=new Date();
+  document.getElementById('reloj').textContent=
+    d.toLocaleTimeString('es-MX',{{hour:'2-digit',minute:'2-digit'}});
+}}
+setInterval(reloj,1000); reloj();
+
+function minutos(creado){{
+  return Math.floor((Date.now()-new Date(creado).getTime())/60000);
+}}
+
+function tarjeta(p){{
+  const min=minutos(p.created_at);
+  const urgente=min>=20?'urgente':'';
+  const flash=(p.estado==='nuevo')?'nuevo-flash':'';
+  const clase=p.estado==='nuevo'?'nuevo':p.estado;
+  const items=(p.items||[]).map(i=>
+    `<li><span class='cant'>${{i.cantidad}}x</span> ${{i.nombre}}</li>`).join('');
+  const nota=p.notas?`<div class='nota'>📝 ${{p.notas}}</div>`:'';
+  const tipo=p.tipo_entrega==='envio'
+    ?`<div class='tipo envio'>🛵 Envío</div><div class='dir'>${{p.direccion||''}}</div>`
+    :`<div class='tipo'>🏪 Para recoger</div>`;
+  let btn='';
+  if(p.estado==='nuevo')   btn=`<button class='btn btn-proceso' onclick="cambiar(${{p.id}},'en_proceso')">Empezar</button>`;
+  if(p.estado==='en_proceso') btn=`<button class='btn btn-listo' onclick="cambiar(${{p.id}},'listo')">Marcar listo</button>`;
+  if(p.estado==='listo')   btn=`<button class='btn btn-entregado' onclick="cambiar(${{p.id}},'entregado')">Entregar</button>`;
+  return `<div class='card ${{clase}} ${{flash}}' data-id='${{p.id}}'>
+    <div class='card-top'><div class='num'>#${{p.id}}</div>
+      <div class='tiempo ${{urgente}}'>${{min}} min</div></div>
+    <div class='cliente'>${{p.nombre_cliente||'Cliente'}}</div>
+    ${{tipo}}
+    <ul class='items'>${{items}}</ul>
+    ${{nota}}
+    <div class='acciones'>${{btn}}</div>
+  </div>`;
+}}
+
+async function cargar(){{
+  try {{
+    const r=await fetch(`/admin/${{PHONE}}/cocina/datos?pwd=${{PWD}}`);
+    const data=await r.json();
+    const activos=data.filter(p=>['nuevo','en_proceso','listo'].includes(p.estado));
+    document.getElementById('num-activos').textContent=activos.length;
+
+    // Detectar pedidos nuevos para sonar alerta
+    const idsActuales=new Set(activos.map(p=>p.id));
+    let hayNuevo=false;
+    activos.forEach(p=>{{ if(!conocidos.has(p.id) && p.estado==='nuevo') hayNuevo=true; }});
+    if(hayNuevo && !primeraCarga) alerta();
+    conocidos=idsActuales;
+    primeraCarga=false;
+
+    const grid=document.getElementById('grid'), vacio=document.getElementById('vacio');
+    if(activos.length===0){{ grid.innerHTML=''; vacio.style.display='block'; }}
+    else {{ vacio.style.display='none'; grid.innerHTML=activos.map(tarjeta).join(''); }}
+  }} catch(e){{ console.error(e); }}
+}}
+
+async function cambiar(id,estado){{
+  const fd=new FormData(); fd.append('estado',estado);
+  await fetch(`/admin/${{PHONE}}/pedidos/${{id}}/estado?pwd=${{PWD}}`,{{method:'POST',body:fd}});
+  cargar();
+}}
+
+cargar();
+setInterval(cargar,8000);  // refresca cada 8 segundos
+</script>
+</body></html>""")
+
+
+@router.get("/admin/{phone_id}/cocina/datos")
+async def panel_cocina_datos(phone_id: str, pwd: str = ""):
+    negocio = _neg(phone_id)
+    if not negocio or not _auth(negocio, pwd):
+        return JSONResponse([], status_code=403)
+    pedidos = db.obtener_pedidos_recientes(negocio["id"], limite=30)
+    return JSONResponse(pedidos)
