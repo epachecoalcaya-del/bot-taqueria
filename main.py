@@ -666,6 +666,14 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                         metodo_pago_usado = notas_raw[6:cierre]
                         notas = notas_raw[cierre + 1:].strip()
 
+                # Segunda capa de proteccion: el metodo de pago online SOLO
+                # tiene sentido si el pedido es de envio. Si por algun
+                # motivo quedo un [PAGO:...] arrastrado en la nota pero el
+                # pedido actual es para recoger, lo ignoramos — evita
+                # cobrar con un metodo de pago de un pedido anterior.
+                if tipo_entrega != "envio":
+                    metodo_pago_usado = ""
+
                 requiere_pago_online = metodo_pago_usado in ("Tarjeta", "Transferencia")
 
                 if requiere_pago_online:
@@ -1131,6 +1139,21 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion",
                                   tipo_entrega="envio", carrito=carrito)
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
+                return
+
+            else:
+                # El cliente escribio algo que no es "recoger" ni "envio"
+                # (ej. una pregunta suelta). No lo mandamos al LLM libre
+                # porque eso podria sacarlo de la fase sin querer y perder
+                # el carrito. Reiteramos la pregunta pendiente.
+                resp = (
+                    "Antes de seguir, ¿me confirmas si tu pedido es para *recoger en el local* "
+                    "o *envío a domicilio*? 😊"
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo", carrito=carrito)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Texto no reconocido en fase 'tipo' ('{texto[:30]}'), reiterando pregunta.")
                 return
 
         # ── LLM CON HERRAMIENTAS ─────────────────────────────────────────────
