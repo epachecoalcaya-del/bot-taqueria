@@ -356,22 +356,50 @@ async def recibir_webhook(request: Request, background_tasks: BackgroundTasks):
 
 @app.post("/webhook_pago")
 async def recibir_webhook_pago(request: Request, background_tasks: BackgroundTasks):
-    """Mercado Pago notifica aqui cuando el estado de un pago cambia
-    (aprobado, rechazado, pendiente). Solo actuamos sobre pagos aprobados;
-    el resto se ignora silenciosamente (Mercado Pago puede reintentar)."""
+    """Mercado Pago notifica aqui cuando el estado de un pago cambia.
+    IMPORTANTE: Mercado Pago manda el tipo y el id de dos formas distintas
+    segun el caso — a veces en el BODY (JSON), a veces como QUERY PARAMS en
+    la URL (ej. '?id=123&topic=merchant_order'). Hay que revisar ambos.
+    Tambien manda dos topics distintos: 'payment' (id es un payment_id
+    directo) y 'merchant_order' (id es una orden que agrupa uno o mas
+    pagos — hay que consultarla para sacar los payment_id reales)."""
     try:
-        data = await request.json()
-        tipo = data.get("type") or data.get("topic")
-        if tipo != "payment":
+        params = dict(request.query_params)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        tipo = params.get("topic") or params.get("type") or body.get("type") or body.get("topic")
+        id_notificacion = params.get("id") or (body.get("data") or {}).get("id") or body.get("id")
+
+        if not tipo or not id_notificacion:
             return {"status": "ok"}
-        payment_id = (data.get("data") or {}).get("id") or data.get("id")
-        if not payment_id:
-            return {"status": "ok"}
-        background_tasks.add_task(procesar_webhook_pago, str(payment_id))
+
+        if tipo == "payment":
+            background_tasks.add_task(procesar_webhook_pago, str(id_notificacion))
+        elif tipo == "merchant_order":
+            background_tasks.add_task(procesar_webhook_merchant_order, str(id_notificacion))
+
         return {"status": "ok"}
     except Exception as e:
         print(f"!!! Error en webhook_pago: {e}")
         return {"status": "ok"}
+
+
+def procesar_webhook_merchant_order(order_id: str):
+    """Una merchant_order agrupa los pagos asociados a una preferencia.
+    La consultamos para sacar los payment_id reales y procesarlos igual
+    que si hubieran llegado como notificacion tipo 'payment'."""
+    try:
+        info = pagos.consultar_merchant_order(order_id)
+        if not info:
+            print(f"!!! No se pudo consultar merchant_order {order_id}")
+            return
+        for payment_id in info.get("payment_ids", []):
+            procesar_webhook_pago(payment_id)
+    except Exception as e:
+        print(f"!!! Error en procesar_webhook_merchant_order: {e}")
 
 
 def procesar_webhook_pago(payment_id: str):
