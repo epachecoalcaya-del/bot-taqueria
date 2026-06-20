@@ -216,6 +216,22 @@ def _precio_linea(nombre: str, cantidad: int, precio_individual: float) -> float
     return (paquetes_completos * precio_paquete) + (piezas_sueltas * precio_individual)
 
 
+def _extraer_pago_de_notas(notas_raw: str) -> tuple:
+    """Extrae el metodo de pago guardado con el prefijo '[PAGO:X]' del
+    campo de notas, si existe. Devuelve (metodo_pago, notas_limpias).
+    Esta es la UNICA funcion que debe usarse para esto — antes habia
+    lugares que hacian este parseo a mano y otros que se les olvidaba,
+    lo que causaba que '[PAGO:Tarjeta]' se mostrara crudo al cliente."""
+    if not notas_raw or not notas_raw.startswith("[PAGO:"):
+        return "", notas_raw
+    cierre = notas_raw.find("]")
+    if cierre == -1:
+        return "", notas_raw
+    metodo = notas_raw[6:cierre]
+    notas_limpias = notas_raw[cierre + 1:].strip()
+    return metodo, notas_limpias
+
+
 def _calcular_total(carrito: list) -> float:
     return sum(_precio_linea(i["nombre"], i["cantidad"], i["precio"]) for i in carrito)
 
@@ -684,13 +700,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
 
                 # Extraer el metodo de pago si viene en el prefijo [PAGO:..]
                 # (solo aplica a envios, ver fase "pago" mas arriba).
-                metodo_pago_usado = ""
-                notas = notas_raw
-                if notas_raw.startswith("[PAGO:"):
-                    cierre = notas_raw.find("]")
-                    if cierre != -1:
-                        metodo_pago_usado = notas_raw[6:cierre]
-                        notas = notas_raw[cierre + 1:].strip()
+                metodo_pago_usado, notas = _extraer_pago_de_notas(notas_raw)
 
                 # Segunda capa de proteccion: el metodo de pago online SOLO
                 # tiene sentido si el pedido es de envio. Si por algun
@@ -880,7 +890,11 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                     return
 
                 # Recoger: no se pregunta metodo de pago, va directo al resumen.
-                notas        = sesion.get("notas_pedido", "")
+                # IMPORTANTE: aunque aqui nunca deberiamos tener un [PAGO:..]
+                # legitimo (la fase "pago" no aplica a recoger), igual lo
+                # limpiamos por seguridad — si quedo arrastrado de un pedido
+                # anterior, NUNCA debe mostrarse crudo al cliente.
+                _, notas = _extraer_pago_de_notas(sesion.get("notas_pedido", ""))
                 total        = _calcular_total(carrito)
                 resumen = _formato_carrito(carrito)
                 notas_linea = f"📝 *Notas:* {notas}\n" if notas else ""
@@ -941,7 +955,11 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 carrito      = sesion["carrito"]
                 nombre_cl    = sesion["nombre_cliente"]
                 direccion    = sesion["direccion_entrega"]
-                notas        = sesion.get("notas_pedido", "")
+                # Limpiamos cualquier [PAGO:..] viejo arrastrado ANTES de
+                # mostrar las notas o de envolverlas con el nuevo metodo —
+                # si no se hace esto, un [PAGO:Tarjeta] viejo termina
+                # mostrandose crudo, o anidado dentro de un nuevo [PAGO:..].
+                _, notas = _extraer_pago_de_notas(sesion.get("notas_pedido", ""))
                 costo_envio_real = sesion.get("costo_envio_calc", 0) or costo_envio
                 total        = _calcular_total(carrito)
                 total_con_envio = total + costo_envio_real
@@ -961,7 +979,8 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 )
                 # Guardamos el metodo de pago dentro de notas_pedido con un
                 # prefijo reconocible (no hay columna dedicada para esto en
-                # la sesion). Se extrae despues al confirmar el pedido.
+                # la sesion). Se extrae despues al confirmar el pedido, ya
+                # limpio (sin anidar con un [PAGO:..] anterior).
                 notas_con_pago = f"[PAGO:{metodo_elegido}] {notas}".strip()
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="confirmando",
@@ -1471,6 +1490,55 @@ REGLAS IMPORTANTES:
         # Si la tool cerrar_pedido devolvio INICIAR_CIERRE, arrancamos el flujo
         # deterministico de cierre (tipo de entrega)
         if iniciar_cierre:
+            # Si el cliente ya habia llegado a definir tipo_entrega antes
+            # (ej. dijo "No" al resumen final y luego "Si" de nuevo tras
+            # modificar algo), reutilizamos esos datos en vez de reiniciar
+            # el flujo desde cero — evita volver a preguntar "recoger o
+            # envio" cuando el cliente ya lo habia contestado.
+            tipo_entrega_previo = sesion.get("tipo_entrega", "")
+            direccion_previa    = sesion.get("direccion_entrega", "")
+            nombre_previo       = sesion.get("nombre_cliente", "")
+
+            if tipo_entrega_previo == "recoger" and nombre_previo:
+                # Ya tenemos todo lo necesario para recoger -> resumen directo
+                _, notas_limpias = _extraer_pago_de_notas(sesion.get("notas_pedido", ""))
+                resumen = _formato_carrito(carrito_estado)
+                notas_linea = f"📝 *Notas:* {notas_limpias}\n" if notas_limpias else ""
+                resp_cierre = (
+                    f"📋 *Resumen de tu pedido*\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"{resumen}\n\n"
+                    f"👤 *Nombre:* {nombre_previo}\n"
+                    f"🏪 *Para recoger* en el local\n"
+                    f"{notas_linea}\n"
+                    f"¿Todo está bien? Responde:\n"
+                    f"✅ *SÍ* para confirmar\n"
+                    f"❌ *NO* para modificar"
+                )
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="confirmando",
+                                  carrito=carrito_estado)
+                enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
+                print(f"   [{nombre_neg}] Cierre reutilizando datos previos (recoger) — directo a confirmación.")
+                return
+
+            elif tipo_entrega_previo == "envio" and direccion_previa and nombre_previo:
+                # Ya teniamos direccion y nombre de envio -> resumen directo,
+                # pero re-preguntamos metodo de pago si no lo teniamos ya
+                # (es razonable, pudo cambiar el carrito).
+                resp_cierre = "¿Cómo deseas pagar? (Efectivo, Transferencia o Tarjeta)"
+                metodos_lista = ", ".join(m.strip() for m in metodos_pago.split(","))
+                resp_cierre = (
+                    f"Para pedidos con envío a domicilio pedimos el pago por adelantado.\n\n"
+                    f"¿Cómo deseas pagar? Opciones: *{metodos_lista}*"
+                )
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="pago",
+                                  carrito=carrito_estado)
+                enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
+                print(f"   [{nombre_neg}] Cierre reutilizando datos previos (envío) — directo a método de pago.")
+                return
+
+            # Caso normal: no hay datos previos de tipo de entrega, arrancar
+            # el flujo desde el principio.
             if tipo_servicio == "recoger":
                 resp_cierre = (
                     f"{_formato_carrito(carrito_estado)}\n\n"
