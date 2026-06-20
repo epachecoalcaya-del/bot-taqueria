@@ -641,11 +641,14 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
         @tool
         def guardar_nota(nota: str) -> str:
             """Guarda una nota o instruccion especial del cliente para su pedido.
-            Usar cuando el cliente pida algo especial como 'sin cilantro',
-            'sin cebolla', 'extra queso', 'bien cocido', etc.
-            IMPORTANTE: esta herramienta SOLO guarda la nota. NO vuelvas a llamar
-            agregar_al_carrito — el producto YA está en el carrito, la nota es
-            solo una instruccion adicional sobre como prepararlo."""
+            Usar cuando el cliente pida algo especial: 'sin cilantro', 'sin cebolla',
+            'extra queso', 'bien cocido', etc.
+            IMPORTANTE:
+            - Incluye SIEMPRE a qué producto aplica la nota. Ej: si el cliente
+              pide '2 tacos de pastor sin cebolla y 1 con todo', guarda la nota
+              como '2 pastor sin cebolla, 1 pastor con todo'.
+            - Esta herramienta SOLO guarda la nota. NO vuelvas a llamar
+              agregar_al_carrito — el producto YA está en el carrito."""
             notas_actuales = sesion.get("notas_pedido", "")
             nueva_nota = f"{notas_actuales} | {nota}".strip(" |") if notas_actuales else nota
             db.guardar_sesion(llave, historial, notas_pedido=nueva_nota)
@@ -716,23 +719,36 @@ REGLAS IMPORTANTES:
         iniciar_cierre = False
 
         if resp_llm.tool_calls:
-            # Proteccion anti-duplicado: si en el mismo turno el modelo llama
-            # guardar_nota Y agregar_al_carrito, es casi seguro que esta
-            # re-agregando un producto que ya estaba (el cliente solo dio una
-            # instruccion tipo "sin cilantro"). En ese caso ignoramos el
-            # agregar_al_carrito para no duplicar la cantidad.
+            # Proteccion anti-duplicado INTELIGENTE: el modelo a veces re-agrega
+            # un producto que ya estaba cuando el cliente solo da una instruccion
+            # ("la quiero sin cebolla"). Para distinguir un re-agregado de un
+            # producto nuevo legitimo, comparamos contra el carrito que YA existe:
+            # si el producto ya esta en el carrito con esa misma cantidad y en el
+            # turno tambien viene guardar_nota, es un re-agregado -> lo saltamos.
+            # Si es un producto nuevo o cantidad distinta, lo procesamos normal.
             nombres_tools = [tc["name"] for tc in resp_llm.tool_calls]
-            ignorar_agregar = ("guardar_nota" in nombres_tools and
-                               "agregar_al_carrito" in nombres_tools)
+            hay_nota = "guardar_nota" in nombres_tools
+            carrito_previo = {c["nombre"]: c["cantidad"] for c in carrito_estado}
+
+            def _es_reagregado(args: dict) -> bool:
+                if not hay_nota:
+                    return False
+                item = _buscar_en_menu(args.get("nombre_producto", ""), menu)
+                if not item:
+                    return False
+                nombre = item["nombre"]
+                cant = max(1, args.get("cantidad", 1))
+                # Ya estaba en el carrito con la misma cantidad -> es re-agregado
+                return carrito_previo.get(nombre) == cant
 
             for tc in resp_llm.tool_calls:
                 fn_name = tc["name"]
                 fn_args = tc["args"]
                 print(f"   [{nombre_neg}] Tool: {fn_name} {fn_args}")
 
-                if fn_name == "agregar_al_carrito" and ignorar_agregar:
-                    print(f"   [{nombre_neg}] agregar_al_carrito ignorado (viene con guardar_nota, evita duplicado).")
-                    tool_results.append("El producto ya estaba en el carrito; solo se registró la nota.")
+                if fn_name == "agregar_al_carrito" and _es_reagregado(fn_args):
+                    print(f"   [{nombre_neg}] agregar_al_carrito saltado (re-agregado de producto ya en carrito).")
+                    tool_results.append("Ese producto ya estaba en el carrito; solo se registró la nota.")
                     continue
 
                 fn_map = {
