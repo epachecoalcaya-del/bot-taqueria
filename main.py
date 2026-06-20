@@ -642,12 +642,15 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
         def guardar_nota(nota: str) -> str:
             """Guarda una nota o instruccion especial del cliente para su pedido.
             Usar cuando el cliente pida algo especial como 'sin cilantro',
-            'sin cebolla', 'extra queso', 'bien cocido', etc."""
+            'sin cebolla', 'extra queso', 'bien cocido', etc.
+            IMPORTANTE: esta herramienta SOLO guarda la nota. NO vuelvas a llamar
+            agregar_al_carrito — el producto YA está en el carrito, la nota es
+            solo una instruccion adicional sobre como prepararlo."""
             notas_actuales = sesion.get("notas_pedido", "")
             nueva_nota = f"{notas_actuales} | {nota}".strip(" |") if notas_actuales else nota
             db.guardar_sesion(llave, historial, notas_pedido=nueva_nota)
             sesion["notas_pedido"] = nueva_nota
-            return f"Nota guardada: '{nota}' ✅"
+            return f"Nota guardada: '{nota}' ✅. El producto ya está en el carrito, no lo agregues de nuevo."
 
         @tool
         def cerrar_pedido() -> str:
@@ -713,10 +716,25 @@ REGLAS IMPORTANTES:
         iniciar_cierre = False
 
         if resp_llm.tool_calls:
+            # Proteccion anti-duplicado: si en el mismo turno el modelo llama
+            # guardar_nota Y agregar_al_carrito, es casi seguro que esta
+            # re-agregando un producto que ya estaba (el cliente solo dio una
+            # instruccion tipo "sin cilantro"). En ese caso ignoramos el
+            # agregar_al_carrito para no duplicar la cantidad.
+            nombres_tools = [tc["name"] for tc in resp_llm.tool_calls]
+            ignorar_agregar = ("guardar_nota" in nombres_tools and
+                               "agregar_al_carrito" in nombres_tools)
+
             for tc in resp_llm.tool_calls:
                 fn_name = tc["name"]
                 fn_args = tc["args"]
                 print(f"   [{nombre_neg}] Tool: {fn_name} {fn_args}")
+
+                if fn_name == "agregar_al_carrito" and ignorar_agregar:
+                    print(f"   [{nombre_neg}] agregar_al_carrito ignorado (viene con guardar_nota, evita duplicado).")
+                    tool_results.append("El producto ya estaba en el carrito; solo se registró la nota.")
+                    continue
+
                 fn_map = {
                     "ver_menu":           ver_menu,
                     "info_producto":      info_producto,
