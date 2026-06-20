@@ -92,6 +92,29 @@ def calcular_tarifa(km: float, lluvia: bool = False) -> Optional[int]:
     return None  # fuera de cobertura
 
 
+def calcular_envio_desde_coords(
+    coords_cliente: Tuple[float, float],
+    coords_negocio: Tuple[float, float],
+    lluvia: bool = False,
+) -> dict:
+    """Igual que calcular_envio_completo, pero quien llama YA tiene las
+    coordenadas del cliente (ej. mando su ubicacion por WhatsApp) — nos
+    saltamos el geocoding de texto, que es innecesario y menos preciso
+    que una ubicacion GPS real compartida directo desde el telefono."""
+    if not GOOGLE_MAPS_API_KEY:
+        return {"ok": False, "costo": None, "km": None, "razon": "Sin API key configurada"}
+
+    km = calcular_distancia_km(coords_negocio, coords_cliente)
+    if km is None:
+        return {"ok": False, "costo": None, "km": None, "razon": "No se pudo calcular la distancia"}
+
+    costo = calcular_tarifa(km, lluvia)
+    if costo is None:
+        return {"ok": False, "costo": None, "km": km, "razon": f"Fuera de cobertura ({km} km, máximo 20 km)"}
+
+    return {"ok": True, "costo": costo, "km": km, "razon": "OK"}
+
+
 def calcular_envio_completo(
     direccion_cliente: str,
     coords_negocio: Tuple[float, float],
