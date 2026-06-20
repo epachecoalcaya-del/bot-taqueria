@@ -247,6 +247,21 @@ def actualizar_pedido_referencia_mp(pedido_id: int, preference_id: str):
         print(f"!!! DB error en actualizar_pedido_referencia_mp: {e}")
 
 
+def marcar_pago_manual(pedido_id: int):
+    """Respaldo manual cuando el dueño confirma el pago por fuera del flujo
+    automatico de Mercado Pago (ej. el cliente pago en efectivo al
+    repartidor, o el webhook fallo). Pasa el pedido a 'nuevo' (aparece en
+    cocina) y marca el pago como recibido, sin necesidad de un payment_id
+    real de Mercado Pago."""
+    try:
+        _get_client().table("pedidos_ordenes").update({
+            "estado_pago": "pagado",
+            "estado": "nuevo",
+        }).eq("id", pedido_id).execute()
+    except Exception as e:
+        print(f"!!! DB error en marcar_pago_manual: {e}")
+
+
 def confirmar_pago_pedido(pedido_id: int, payment_id: str):
     """Marca un pedido como pagado y lo pasa a estado 'nuevo' para que
     aparezca en la cocina — se llama cuando el webhook de Mercado Pago
@@ -272,6 +287,22 @@ def rechazar_pago_pedido(pedido_id: int, payment_id: str):
         print(f"!!! DB error en rechazar_pago_pedido: {e}")
 
 
+def obtener_pedido_por_id(pedido_id: int) -> Optional[dict]:
+    """Devuelve un pedido especifico por su ID, o None si no existe."""
+    try:
+        r = (
+            _get_client()
+            .table("pedidos_ordenes")
+            .select("*")
+            .eq("id", pedido_id)
+            .execute()
+        )
+        return r.data[0] if r.data else None
+    except Exception as e:
+        print(f"!!! DB error en obtener_pedido_por_id: {e}")
+        return None
+
+
 def actualizar_estado_pedido(pedido_id: int, estado: str) -> bool:
     """Actualiza el estado de un pedido (nuevo/en_proceso/listo/entregado/cancelado)."""
     try:
@@ -283,6 +314,29 @@ def actualizar_estado_pedido(pedido_id: int, estado: str) -> bool:
     except Exception as e:
         print(f"!!! DB error en actualizar_estado_pedido: {e}")
         return False
+
+
+def buscar_pedido_cancelable(negocio_id: int, telefono: str) -> Optional[dict]:
+    """Busca el pedido mas reciente de un cliente que todavia se puede
+    cancelar (estados 'nuevo' o 'pendiente_pago' — antes de que la cocina
+    empiece a prepararlo). Si ya esta 'en_proceso' o despues, no se puede
+    cancelar por WhatsApp y el cliente debe hablar directo con el negocio."""
+    try:
+        r = (
+            _get_client()
+            .table("pedidos_ordenes")
+            .select("*")
+            .eq("negocio_id", negocio_id)
+            .eq("telefono", telefono)
+            .in_("estado", ["nuevo", "pendiente_pago"])
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return r.data[0] if r.data else None
+    except Exception as e:
+        print(f"!!! DB error en buscar_pedido_cancelable: {e}")
+        return None
 
 
 def obtener_pedidos_recientes(negocio_id: int, limite: int = 50) -> list:
