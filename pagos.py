@@ -66,6 +66,30 @@ def crear_link_pago(
         return None
 
 
+def consultar_merchant_order(order_id: str) -> Optional[dict]:
+    """Consulta una 'merchant order' (orden que agrupa los pagos de una
+    preferencia) y devuelve la lista de payment_id asociados. Mercado Pago
+    a veces notifica por merchant_order en vez de directo por payment,
+    sobre todo en los primeros segundos de un pago en proceso."""
+    if not MP_ACCESS_TOKEN:
+        return None
+    try:
+        r = requests.get(
+            f"{MP_API_BASE}/merchant_orders/{order_id}",
+            headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
+            timeout=10,
+        )
+        data = r.json()
+        if r.status_code != 200:
+            print(f"!!! Error consultando merchant_order {order_id}: {data}")
+            return None
+        payment_ids = [str(p["id"]) for p in data.get("payments", [])]
+        return {"payment_ids": payment_ids}
+    except Exception as e:
+        print(f"!!! Error consultando merchant_order: {e}")
+        return None
+
+
 def consultar_pago(payment_id: str) -> Optional[dict]:
     """Consulta el estado de un pago especifico por su ID.
     Devuelve dict con 'status' ('approved', 'pending', 'rejected', etc.),
