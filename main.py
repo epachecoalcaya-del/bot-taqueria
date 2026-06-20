@@ -323,8 +323,20 @@ async def recibir_webhook(request: Request, background_tasks: BackgroundTasks):
             return {"status": "ok"}
         msg     = msgs[0]
         tipo    = msg.get("type", "")
+        coords_ubicacion = None
         if tipo == "text":
             texto = msg["text"]["body"].strip()
+        elif tipo == "location":
+            loc = msg.get("location", {})
+            lat, lng = loc.get("latitude"), loc.get("longitude")
+            if lat is None or lng is None:
+                return {"status": "ok"}
+            coords_ubicacion = (float(lat), float(lng))
+            # Texto placeholder; procesar_mensaje detecta coords_ubicacion
+            # y lo trata como una direccion ya geocodificada, sin volver a
+            # llamar a la API de geocoding (es mas preciso y mas rapido).
+            nombre_lugar = loc.get("name") or loc.get("address") or ""
+            texto = f"[ubicación]{(' ' + nombre_lugar) if nombre_lugar else ''}"
         elif tipo in ("image", "audio", "video", "document", "sticker"):
             texto = f"[{tipo}]"
         else:
@@ -333,7 +345,7 @@ async def recibir_webhook(request: Request, background_tasks: BackgroundTasks):
         phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
         if not phone_number_id or phone_number_id not in _negocios_cache:
             return {"status": "ok"}
-        background_tasks.add_task(procesar_mensaje, texto, telefono, phone_number_id)
+        background_tasks.add_task(procesar_mensaje, texto, telefono, phone_number_id, coords_ubicacion)
         return {"status": "ok"}
     except Exception as e:
         print(f"!!! Error en webhook: {e}")
@@ -342,7 +354,7 @@ async def recibir_webhook(request: Request, background_tasks: BackgroundTasks):
 
 # ── PROCESAMIENTO PRINCIPAL ──────────────────────────────────────────────────
 
-def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
+def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubicacion=None):
     try:
         # Leemos la config del negocio SIEMPRE fresca de Supabase para que
         # cualquier cambio desde el panel aplique en el siguiente mensaje,
@@ -569,6 +581,58 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
         # FASE: direccion — esperando dirección de envío
         if fase == "direccion":
             direccion = texto.strip()
+            # Si el cliente comparte su ubicacion GPS (tipo "location" de
+            # WhatsApp), usamos las coordenadas exactas directo — es mas
+            # preciso que pedirle que escriba la direccion, y mas rapido
+            # (sin geocoding de texto). Guardamos un texto legible para el
+            # resumen y el correo al dueno.
+            if coords_ubicacion:
+                direccion = "📍 Ubicación compartida por WhatsApp"
+                costo_calculado = costo_envio
+                aviso_envio = ""
+
+                if envio_dinamico and coords_negocio:
+                    resultado = geo.calcular_envio_desde_coords(coords_ubicacion, coords_negocio, lluvia=modo_lluvia)
+                    if resultado["ok"]:
+                        costo_calculado = resultado["costo"]
+                        km = resultado["km"]
+                        aviso_envio = f"\n_Distancia: {km} km — Envío: {_fmt_precio(costo_calculado)}_"
+                        # Guardamos tambien un link de Google Maps en la
+                        # direccion para que el dueño/repartidor pueda abrirla
+                        # directo, ademas de las coordenadas.
+                        lat, lng = coords_ubicacion
+                        direccion = f"📍 https://maps.google.com/?q={lat},{lng}"
+                    elif "Fuera de cobertura" in resultado["razon"]:
+                        resp = (
+                            f"Tu ubicación está fuera de nuestra zona de cobertura para envío "
+                            f"({resultado['km']} km, máximo 20 km). "
+                            f"¿Prefieres pasar a recoger tu pedido al local?"
+                        )
+                        nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                        db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo", carrito=carrito)
+                        enviar_whatsapp(telefono, resp, token, phone_number_id)
+                        print(f"   [{nombre_neg}] Ubicación fuera de cobertura ({resultado['km']} km).")
+                        return
+                    else:
+                        # Fallo el calculo de distancia con la API (raro, pero
+                        # puede pasar) — seguimos con la tarifa fija como
+                        # respaldo en vez de trabar al cliente.
+                        print(f"   [{nombre_neg}] No se pudo calcular distancia desde ubicación: {resultado['razon']}")
+                        lat, lng = coords_ubicacion
+                        direccion = f"📍 https://maps.google.com/?q={lat},{lng}"
+
+                resp = f"¿A nombre de quién registramos el pedido?{aviso_envio}"
+                db.guardar_sesion(llave, historial, fase_pedido="nombre",
+                                  direccion_entrega=direccion, carrito=carrito,
+                                  costo_envio_calc=costo_calculado)
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="nombre",
+                                  direccion_entrega=direccion, carrito=carrito,
+                                  costo_envio_calc=costo_calculado)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Ubicación GPS capturada — envío: ${costo_calculado}")
+                return
+
             if len(direccion) >= 5:
                 costo_calculado = costo_envio  # fallback: tarifa fija configurada
                 aviso_envio = ""
@@ -597,7 +661,8 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                         else:
                             resp = (
                                 "No logré ubicar bien esa dirección. ¿Puedes darme más detalles "
-                                "(calle, número, colonia) para calcular el envío correctamente?"
+                                "(calle, número, colonia), o mejor mándame tu ubicación con el "
+                                "📎 de WhatsApp para calcular el envío exacto?"
                             )
                             nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
                             db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion", carrito=carrito)
@@ -667,7 +732,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                     enviar_whatsapp(telefono, resp, token, phone_number_id)
                     return
 
-                resp = "¿Cuál es tu dirección de entrega?"
+                resp = "¿Cuál es tu dirección de entrega? 📍 También puedes compartir tu ubicación con el clip de WhatsApp para mayor precisión."
                 db.guardar_sesion(llave, historial, fase_pedido="direccion",
                                   tipo_entrega="envio", carrito=carrito)
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
@@ -935,7 +1000,7 @@ REGLAS IMPORTANTES:
             elif tipo_servicio == "envio":
                 resp_cierre = (
                     f"{_formato_carrito(carrito_estado, costo_envio)}\n\n"
-                    "¿Cuál es tu dirección de entrega?"
+                    "¿Cuál es tu dirección de entrega? 📍 También puedes compartir tu ubicación con el clip de WhatsApp para mayor precisión."
                 )
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion",
                                   tipo_entrega="envio", carrito=carrito_estado)
