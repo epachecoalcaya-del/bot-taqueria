@@ -246,17 +246,58 @@ def _formato_menu(items: list) -> str:
     return "\n".join(lineas)
 
 
+def _normalizar_txt(s: str) -> str:
+    import unicodedata
+    return unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode()
+
+
+def _singularizar(palabra: str) -> str:
+    """Quita plurales simples en espanol: volcanes->volcan, tacos->taco,
+    aguas->agua. Permite que 'dame volcanes' encuentre todas las variantes
+    de Volcan en el menu sin que el plural rompa la coincidencia."""
+    if palabra.endswith("ces"):
+        return palabra[:-3] + "z"
+    if palabra.endswith("es") and len(palabra) > 4:
+        return palabra[:-2]
+    if palabra.endswith("s") and len(palabra) > 3:
+        return palabra[:-1]
+    return palabra
+
+
 def _buscar_en_menu(texto: str, menu: list) -> Optional[dict]:
-    """Busca un producto en el menu por nombre (coincidencia parcial,
-    insensible a mayusculas y acentos)."""
-    def normalizar(s):
-        import unicodedata
-        return unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode()
-    t = normalizar(texto)
-    for item in menu:
-        if normalizar(item["nombre"]) in t or t in normalizar(item["nombre"]):
-            return item
+    """Busca un producto en el menu por nombre. Solo devuelve resultado si
+    hay una unica coincidencia clara (ver _buscar_coincidencias)."""
+    coincidencias = _buscar_coincidencias(texto, menu)
+    if len(coincidencias) == 1:
+        return coincidencias[0]
     return None
+
+
+def _buscar_coincidencias(texto: str, menu: list) -> list:
+    """Devuelve TODAS las coincidencias posibles de un texto contra el menu.
+    Prioriza: 1) coincidencia exacta de nombre completo, 2) el texto contiene
+    el nombre completo del producto (busqueda especifica), 3) el nombre
+    singularizado del texto esta contenido en el nombre del producto
+    (busqueda generica, ej. 'volcanes' encuentra las 4 variantes de Volcan).
+    Esto evita que un termino generico devuelva solo la primera coincidencia
+    cuando en realidad hay varias variantes — en ese caso deben devolverse
+    todas para que la herramienta pueda detectar la ambiguedad y preguntar."""
+    t = _normalizar_txt(texto.strip())
+    t_sing = " ".join(_singularizar(p) for p in t.split())
+
+    exactas = [i for i in menu if _normalizar_txt(i["nombre"]) == t]
+    if exactas:
+        return exactas
+
+    contiene_nombre = [i for i in menu if _normalizar_txt(i["nombre"]) in t]
+    if contiene_nombre:
+        return contiene_nombre
+
+    texto_en_nombre = [i for i in menu if t_sing in _normalizar_txt(i["nombre"])]
+    if texto_en_nombre:
+        return texto_en_nombre
+
+    return [i for i in menu if t in _normalizar_txt(i["nombre"])]
 
 
 # ── WEBHOOK ──────────────────────────────────────────────────────────────────
@@ -603,14 +644,30 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
 
         @tool
         def agregar_al_carrito(nombre_producto: str, cantidad: int = 1) -> str:
-            """Agrega uno o varios productos al carrito del cliente.
+            """Agrega un producto al carrito del cliente.
             nombre_producto: nombre exacto o aproximado del producto segun el menu.
-            cantidad: cuantos quiere (default 1)."""
-            item = _buscar_en_menu(nombre_producto, menu)
-            if not item:
+            cantidad: cuantos quiere (default 1).
+            IMPORTANTE: si el cliente menciona un producto generico que tiene
+            varias variantes en el menu (ej. 'volcán' cuando hay Volcán de
+            Pastor/Bistec/Sirloin/Chorizo, o 'agua' cuando hay Agua 1L y ½L),
+            esta herramienta te devolverá la lista de opciones — debes
+            preguntarle al cliente cuál quiere en vez de elegir tú."""
+            coincidencias = _buscar_coincidencias(nombre_producto, menu)
+
+            if not coincidencias:
                 nombres = ", ".join(i["nombre"] for i in menu)
                 return f"No encontré '{nombre_producto}' en el menú. Los productos disponibles son: {nombres}."
-            # Si ya existe en el carrito, sumar cantidad
+
+            if len(coincidencias) > 1:
+                opciones = "\n".join(
+                    f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in coincidencias
+                )
+                return (
+                    f"'{nombre_producto}' tiene varias opciones en el menú, "
+                    f"pregúntale al cliente cuál de estas quiere (NO elijas tú):\n{opciones}"
+                )
+
+            item = coincidencias[0]
             for c in carrito_estado:
                 if c["nombre"] == item["nombre"]:
                     c["cantidad"] += max(1, cantidad)
@@ -692,6 +749,7 @@ Métodos de pago aceptados: {metodos_pago}
 
 REGLAS IMPORTANTES:
 - Usa SIEMPRE la herramienta agregar_al_carrito para añadir productos. NUNCA inventes precios.
+- Si el cliente pide un producto genérico que tiene varias variantes (ej. "volcán", "torta", "agua", "hamburguesa", "papa rellena") SIN especificar cuál, y agregar_al_carrito te devuelve una lista de opciones, DEBES preguntarle al cliente cuál variante quiere ANTES de continuar. NUNCA elijas una variante por tu cuenta — eso causa errores graves en el pedido real.
 - Cuando el cliente pregunte qué lleva o qué ingredientes tiene un producto, usa SIEMPRE la herramienta info_producto. NUNCA inventes ingredientes ni agregues cosas que no estén en la descripción del menú.
 - Cuando el cliente pida algo especial (sin cilantro, sin cebolla, extra queso, bien cocido, etc.), usa guardar_nota para registrarlo. NUNCA ignores estas instrucciones.
 - NO llames agregar_al_carrito y cerrar_pedido en el mismo mensaje. Si el cliente dice 'es todo' o 'nada más', llama SOLO cerrar_pedido.
