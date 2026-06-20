@@ -167,11 +167,16 @@ def guardar_sesion(
 
 def limpiar_sesion(llave: str):
     """Limpia el carrito y estado del pedido al terminar un pedido,
-    pero conserva el historial para que el bot recuerde contexto previo."""
+    pero conserva el historial para que el bot recuerde contexto previo.
+    IMPORTANTE: notas_pedido tambien se limpia — incluye el metodo de pago
+    guardado con el prefijo '[PAGO:...]', y si no se limpia se arrastra
+    al siguiente pedido del mismo cliente, causando que se cobre con el
+    metodo de pago equivocado."""
     guardar_sesion(
         llave, [], False,
         carrito=[], fase_pedido="", tipo_entrega="",
         direccion_entrega="", nombre_cliente="", costo_envio_calc=0,
+        notas_pedido="",
     )
 
 
