@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain.tools import tool
 import database as db
 import geo
+import pagos
 
 load_dotenv()
 
@@ -351,6 +352,88 @@ async def recibir_webhook(request: Request, background_tasks: BackgroundTasks):
         return {"status": "ok"}
 
 
+# ── WEBHOOK DE PAGOS (Mercado Pago) ──────────────────────────────────────────
+
+@app.post("/webhook_pago")
+async def recibir_webhook_pago(request: Request, background_tasks: BackgroundTasks):
+    """Mercado Pago notifica aqui cuando el estado de un pago cambia
+    (aprobado, rechazado, pendiente). Solo actuamos sobre pagos aprobados;
+    el resto se ignora silenciosamente (Mercado Pago puede reintentar)."""
+    try:
+        data = await request.json()
+        tipo = data.get("type") or data.get("topic")
+        if tipo != "payment":
+            return {"status": "ok"}
+        payment_id = (data.get("data") or {}).get("id") or data.get("id")
+        if not payment_id:
+            return {"status": "ok"}
+        background_tasks.add_task(procesar_webhook_pago, str(payment_id))
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"!!! Error en webhook_pago: {e}")
+        return {"status": "ok"}
+
+
+def procesar_webhook_pago(payment_id: str):
+    """Consulta el pago en Mercado Pago, encuentra el pedido relacionado
+    por su preference_id, y si el pago fue aprobado lo pasa a cocina."""
+    try:
+        info = pagos.consultar_pago(payment_id)
+        if not info:
+            print(f"!!! No se pudo consultar el pago {payment_id}")
+            return
+
+        referencia = info.get("external_reference", "")
+        pedido = db.buscar_pedido_por_referencia(referencia)
+        if not pedido:
+            # Puede pasar si el pago no corresponde a esta taqueria, o si
+            # el webhook llega antes de que guardemos la referencia — no
+            # es necesariamente un error.
+            print(f"!!! No se encontró pedido para referencia '{referencia}' (pago {payment_id})")
+            return
+
+        pedido_id = pedido["id"]
+        estado_mp = info.get("status")
+
+        if estado_mp == "approved":
+            db.confirmar_pago_pedido(pedido_id, payment_id)
+            print(f"   [Pagos] Pedido #{pedido_id} — pago APROBADO (${info.get('monto')}). Pasa a cocina.")
+            # Avisamos al cliente que su pedido ya esta confirmado. Buscamos
+            # el negocio (telefono + token de WhatsApp) por su negocio_id
+            # entre los negocios cargados en cache.
+            telefono_neg, token_neg = None, None
+            for pid, neg in _negocios_cache.items():
+                if neg.get("id") == pedido.get("negocio_id"):
+                    token_neg = neg.get("whatsapp_token")
+                    telefono_neg = pid
+                    break
+            if telefono_neg and token_neg:
+                resp = (
+                    f"✅ *¡Pago confirmado! Pedido #{pedido_id}*\n\n"
+                    f"Tu pedido ya pasó a preparación. 🌮\n"
+                    f"¡Gracias por tu preferencia!"
+                )
+                enviar_whatsapp(pedido["telefono"], resp, token_neg, telefono_neg)
+
+        elif estado_mp == "rejected":
+            db.rechazar_pago_pedido(pedido_id, payment_id)
+            print(f"   [Pagos] Pedido #{pedido_id} — pago RECHAZADO.")
+            for pid, neg in _negocios_cache.items():
+                if neg.get("id") == pedido.get("negocio_id"):
+                    resp = (
+                        f"❌ Tu pago para el pedido #{pedido_id} no pudo procesarse.\n"
+                        f"¿Quieres intentar de nuevo o prefieres pagar en efectivo?"
+                    )
+                    enviar_whatsapp(pedido["telefono"], resp, neg.get("whatsapp_token"), pid)
+                    break
+        else:
+            print(f"   [Pagos] Pedido #{pedido_id} — pago en estado '{estado_mp}', sin acción.")
+
+    except Exception as e:
+        import traceback
+        print(f"!!! Error en procesar_webhook_pago: {e}\n{traceback.format_exc()}")
+
+
 # ── PROCESAMIENTO PRINCIPAL ──────────────────────────────────────────────────
 
 def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubicacion=None):
@@ -470,6 +553,70 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                         metodo_pago_usado = notas_raw[6:cierre]
                         notas = notas_raw[cierre + 1:].strip()
 
+                requiere_pago_online = metodo_pago_usado in ("Tarjeta", "Transferencia")
+
+                if requiere_pago_online:
+                    # No confirmamos el pedido todavia — lo guardamos en
+                    # estado 'pendiente_pago' (no aparece en cocina) y le
+                    # mandamos al cliente un link de Mercado Pago. Solo
+                    # cuando el webhook de pagos confirme el pago aprobado,
+                    # el pedido pasa a 'nuevo' y aparece en la cocina.
+                    referencia = f"taqueria_{telefono}_{int(datetime.datetime.now().timestamp())}"
+                    pedido_id = db.guardar_pedido(
+                        negocio_id=negocio_id, telefono=telefono,
+                        nombre_cliente=nombre_cl, items=carrito,
+                        total=total_con_envio, tipo_entrega=tipo_entrega,
+                        direccion=direccion, notas=notas,
+                        metodo_pago=metodo_pago_usado,
+                        estado_pago="pendiente",
+                        estado_inicial="pendiente_pago",
+                    )
+                    if not pedido_id:
+                        resp = "Hubo un problema guardando tu pedido. Por favor intenta de nuevo en un momento."
+                        enviar_whatsapp(telefono, resp, token, phone_number_id)
+                        return
+
+                    url_webhook = "https://bot-taqueria.onrender.com/webhook_pago"
+                    resultado_mp = pagos.crear_link_pago(
+                        pedido_referencia=referencia,
+                        nombre_negocio=nombre_neg,
+                        descripcion=f"Pedido #{pedido_id}",
+                        monto=total_con_envio,
+                        url_notificacion=url_webhook,
+                    )
+
+                    if not resultado_mp:
+                        # Fallo Mercado Pago — no dejamos al cliente colgado,
+                        # ofrecemos efectivo como respaldo.
+                        resp = (
+                            "Tuvimos un problema generando el link de pago. 😕\n"
+                            "¿Prefieres pagar en efectivo al recibir tu pedido?"
+                        )
+                        nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                        db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="pago", carrito=carrito)
+                        enviar_whatsapp(telefono, resp, token, phone_number_id)
+                        return
+
+                    # Guardamos la referencia de Mercado Pago en el pedido
+                    # para poder encontrarlo cuando llegue el webhook.
+                    db.actualizar_pedido_referencia_mp(pedido_id, resultado_mp["preference_id"])
+
+                    resp = (
+                        f"📋 Tu pedido #{pedido_id} está listo, solo falta el pago.\n\n"
+                        f"💰 Total a pagar: *{_fmt_precio(total_con_envio)}*\n"
+                        f"💳 Método: *{metodo_pago_usado}*\n\n"
+                        f"Paga aquí de forma segura:\n{resultado_mp['link_pago']}\n\n"
+                        f"_En cuanto se confirme tu pago, tu pedido pasará a preparación automáticamente._ ✅"
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:])
+                    db.limpiar_sesion(llave)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Pedido #{pedido_id} pendiente de pago ({metodo_pago_usado}) — link generado.")
+                    return
+
+                # Efectivo (o sin metodo de pago, ej. para recoger): se
+                # confirma directo, igual que antes.
                 pedido_id = db.guardar_pedido(
                     negocio_id=negocio_id, telefono=telefono,
                     nombre_cliente=nombre_cl, items=carrito,

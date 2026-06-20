@@ -63,6 +63,7 @@ td { padding: 8px 10px; border-bottom: 1px solid #f1f5f9; }
 .badge-listo      { background: #dcfce7; color: #15803d; }
 .badge-entregado  { background: #e0e7ff; color: #4338ca; }
 .badge-cancelado  { background: #fee2e2; color: #b91c1c; }
+.badge-pendiente_pago { background: #fff7ed; color: #c2410c; }
 nav { display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap; }
 nav a { padding: 8px 16px; border-radius: 8px; font-size: .88rem;
         text-decoration: none; color: #475569; background: #fff;

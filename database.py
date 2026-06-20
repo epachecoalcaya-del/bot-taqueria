@@ -187,10 +187,16 @@ def guardar_pedido(
     direccion: str = "",
     metodo_pago: str = "",
     notas: str = "",
+    estado_pago: str = "no_aplica",
+    estado_inicial: str = "nuevo",
+    mp_preference_id: Optional[str] = None,
 ) -> Optional[int]:
-    """Guarda un pedido confirmado. Devuelve el ID del pedido o None si falla."""
+    """Guarda un pedido. Si estado_pago es 'pendiente' (esperando pago con
+    tarjeta/transferencia), el pedido se guarda pero con estado_inicial
+    distinto a 'nuevo' para que NO aparezca en la cocina hasta que se
+    confirme el pago via webhook. Devuelve el ID del pedido o None si falla."""
     try:
-        r = _get_client().table("pedidos_ordenes").insert({
+        datos = {
             "negocio_id":    negocio_id,
             "telefono":      telefono,
             "nombre_cliente": nombre_cliente,
@@ -200,12 +206,70 @@ def guardar_pedido(
             "direccion":     direccion,
             "metodo_pago":   metodo_pago,
             "notas":         notas,
-            "estado":        "nuevo",
-        }).execute()
+            "estado":        estado_inicial,
+            "estado_pago":   estado_pago,
+        }
+        if mp_preference_id:
+            datos["mp_preference_id"] = mp_preference_id
+        r = _get_client().table("pedidos_ordenes").insert(datos).execute()
         return r.data[0]["id"] if r.data else None
     except Exception as e:
         print(f"!!! DB error en guardar_pedido: {e}")
         return None
+
+
+def buscar_pedido_por_referencia(referencia: str) -> Optional[dict]:
+    """Busca un pedido por su external_reference de Mercado Pago
+    (formato 'taqueria_{telefono}_{timestamp}'), usado por el webhook
+    de pagos para encontrar a que pedido corresponde una notificacion."""
+    try:
+        r = (
+            _get_client()
+            .table("pedidos_ordenes")
+            .select("*")
+            .eq("mp_preference_id", referencia)
+            .execute()
+        )
+        return r.data[0] if r.data else None
+    except Exception as e:
+        print(f"!!! DB error en buscar_pedido_por_referencia: {e}")
+        return None
+
+
+def actualizar_pedido_referencia_mp(pedido_id: int, preference_id: str):
+    """Guarda el preference_id de Mercado Pago en un pedido recien creado,
+    para poder relacionarlo despues cuando llegue el webhook de pago."""
+    try:
+        _get_client().table("pedidos_ordenes").update({
+            "mp_preference_id": preference_id,
+        }).eq("id", pedido_id).execute()
+    except Exception as e:
+        print(f"!!! DB error en actualizar_pedido_referencia_mp: {e}")
+
+
+def confirmar_pago_pedido(pedido_id: int, payment_id: str):
+    """Marca un pedido como pagado y lo pasa a estado 'nuevo' para que
+    aparezca en la cocina — se llama cuando el webhook de Mercado Pago
+    confirma que el pago fue aprobado."""
+    try:
+        _get_client().table("pedidos_ordenes").update({
+            "estado_pago": "pagado",
+            "estado": "nuevo",
+            "mp_payment_id": payment_id,
+        }).eq("id", pedido_id).execute()
+    except Exception as e:
+        print(f"!!! DB error en confirmar_pago_pedido: {e}")
+
+
+def rechazar_pago_pedido(pedido_id: int, payment_id: str):
+    """Marca un pedido como pago rechazado — NO lo pasa a cocina."""
+    try:
+        _get_client().table("pedidos_ordenes").update({
+            "estado_pago": "rechazado",
+            "mp_payment_id": payment_id,
+        }).eq("id", pedido_id).execute()
+    except Exception as e:
+        print(f"!!! DB error en rechazar_pago_pedido: {e}")
 
 
 def actualizar_estado_pedido(pedido_id: int, estado: str) -> bool:
