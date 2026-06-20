@@ -231,9 +231,7 @@ def _formato_menu(items: list) -> str:
         emoji = _emoji_cat(cat)
         lineas.append(f"{emoji} *{cat.upper()}*")
         for p in productos:
-            desc = f" _{p['descripcion']}_" if p.get("descripcion") else ""
-            lineas.append(f"  • *{p['nombre']}*{desc}")
-            lineas.append(f"    {_fmt_precio(float(p['precio']))}")
+            lineas.append(f"  • *{p['nombre']}* — {_fmt_precio(float(p['precio']))}")
         if idx < total_cats - 1:
             lineas.append("")
 
@@ -241,8 +239,9 @@ def _formato_menu(items: list) -> str:
         "",
         "━━━━━━━━━━━━━━",
         "👇 *¿Qué te gustaría ordenar?*",
-        "_Puedes pedir varios productos a la vez,_",
-        "_por ejemplo: \"2 tacos de pastor y una horchata\"_",
+        "_Puedes pedir varios productos a la vez, por ejemplo:_",
+        "_\"2 tacos de pastor y una horchata\"_",
+        "_¿Quieres saber qué lleva algún platillo? Solo pregunta._",
     ]
     return "\n".join(lineas)
 
@@ -822,7 +821,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
             if pedido_min > 0 and subtotal < pedido_min:
                 falta = pedido_min - subtotal
                 aviso_min = f"\n\n_Te faltan {_fmt_precio(falta)} para el pedido mínimo de {_fmt_precio(pedido_min)}._"
-            return f"{carrito_txt}{aviso_min}"
+            return f"{carrito_txt}{aviso_min}\n\n¿Algo más, o ya sería todo? 😊"
 
         @tool
         def quitar_del_carrito(nombre_producto: str) -> str:
@@ -894,6 +893,7 @@ REGLAS IMPORTANTES:
 - Cuando el cliente pregunte qué lleva o qué ingredientes tiene un producto, usa SIEMPRE la herramienta info_producto. NUNCA inventes ingredientes ni agregues cosas que no estén en la descripción del menú.
 - Cuando el cliente pida algo especial (sin cilantro, sin cebolla, extra queso, bien cocido, etc.), usa guardar_nota para registrarlo. NUNCA ignores estas instrucciones.
 - NO llames agregar_al_carrito y cerrar_pedido en el mismo mensaje. Si el cliente dice 'es todo' o 'nada más', llama SOLO cerrar_pedido.
+- REGLA CRÍTICA: si el cliente responde solo "sí", "ok", "va", "dale", "claro" u otra confirmación corta SIN mencionar ningún producto nuevo, NUNCA llames agregar_al_carrito repitiendo el último producto que pidió — eso duplicaría su pedido por error y es un fallo grave. Una confirmación corta sin producto nuevo significa que está de acuerdo con algo que dijiste (el carrito, el precio, etc.), no que quiera repetir la compra. Si no tienes claro a qué se refiere, pregúntale qué más desea agregar.
 - Cuando agregues uno o varios productos, el resultado de agregar_al_carrito ya trae el carrito completo con precios y subtotal formateado. Usa ESE texto en tu respuesta tal cual (puedes agregar una frase corta antes como "¡Listo! Así va tu pedido:"), NUNCA reescribas la lista de productos tú mismo ni inventes cómo agrupar las cantidades — eso causa errores graves como mostrar productos duplicados o cantidades incorrectas.
 - Si el cliente pide algo que no está en el menú, indícalo claramente y ofrece alternativas.
 - Cuando el cliente diga que ya terminó de pedir (eso es todo / ya es todo / nada más / con eso / etc.), llama cerrar_pedido.
@@ -924,26 +924,46 @@ REGLAS IMPORTANTES:
 
         if resp_llm.tool_calls:
             # Proteccion anti-duplicado INTELIGENTE: el modelo a veces re-agrega
-            # un producto que ya estaba cuando el cliente solo da una instruccion
-            # ("la quiero sin cebolla"). Para distinguir un re-agregado de un
-            # producto nuevo legitimo, comparamos contra el carrito que YA existe:
-            # si el producto ya esta en el carrito con esa misma cantidad y en el
-            # turno tambien viene guardar_nota, es un re-agregado -> lo saltamos.
-            # Si es un producto nuevo o cantidad distinta, lo procesamos normal.
+            # un producto que ya estaba en dos escenarios:
+            # 1) El cliente da una instruccion tipo "sin cebolla" junto con
+            #    guardar_nota -> el modelo repite el producto sin necesidad.
+            # 2) El cliente responde una confirmacion CORTA y generica ("si",
+            #    "ok", "va", "dale") SIN mencionar ningun producto, y el
+            #    modelo malinterpreta eso como "repite mi ultimo pedido".
+            # En ambos casos: si el producto ya esta en el carrito con la
+            # misma cantidad Y el cliente no nombro el producto en su mensaje,
+            # es casi seguro un re-agregado erroneo -> lo bloqueamos.
             nombres_tools = [tc["name"] for tc in resp_llm.tool_calls]
             hay_nota = "guardar_nota" in nombres_tools
             carrito_previo = {c["nombre"]: c["cantidad"] for c in carrito_estado}
 
+            _CONFIRMACIONES_CORTAS = {
+                "si", "sí", "ok", "okay", "va", "dale", "claro", "yes",
+                "correcto", "asi es", "así es", "perfecto", "vale",
+            }
+            es_confirmacion_corta = (
+                texto_low.strip(".,!¡¿? ") in _CONFIRMACIONES_CORTAS
+                and len(texto.split()) <= 3
+            )
+
             def _es_reagregado(args: dict) -> bool:
-                if not hay_nota:
-                    return False
                 item = _buscar_en_menu(args.get("nombre_producto", ""), menu)
                 if not item:
                     return False
                 nombre = item["nombre"]
                 cant = max(1, args.get("cantidad", 1))
-                # Ya estaba en el carrito con la misma cantidad -> es re-agregado
-                return carrito_previo.get(nombre) == cant
+                # Ya estaba en el carrito con la misma cantidad...
+                if carrito_previo.get(nombre) != cant:
+                    return False
+                # ...y o bien viene una nota en el mismo turno (instruccion
+                # sobre el producto ya agregado), o el cliente NO menciono
+                # ningun producto en su mensaje (confirmacion vaga) -> en
+                # cualquiera de los dos casos, es un re-agregado erroneo.
+                if hay_nota:
+                    return True
+                if es_confirmacion_corta:
+                    return True
+                return False
 
             for tc in resp_llm.tool_calls:
                 fn_name = tc["name"]
@@ -951,8 +971,11 @@ REGLAS IMPORTANTES:
                 print(f"   [{nombre_neg}] Tool: {fn_name} {fn_args}")
 
                 if fn_name == "agregar_al_carrito" and _es_reagregado(fn_args):
-                    print(f"   [{nombre_neg}] agregar_al_carrito saltado (re-agregado de producto ya en carrito).")
-                    tool_results.append("Ese producto ya estaba en el carrito; solo se registró la nota.")
+                    print(f"   [{nombre_neg}] agregar_al_carrito saltado (re-agregado erroneo: confirmacion corta o nota sin producto nuevo).")
+                    tool_results.append(
+                        "No agregues ese producto de nuevo — el cliente solo confirmó algo, "
+                        "no pidió repetir su pedido. Pregúntale si quiere algo más."
+                    )
                     continue
 
                 fn_map = {
