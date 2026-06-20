@@ -1043,7 +1043,6 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
             # igual que una ubicacion GPS real — evita geocodificar la URL
             # cruda como si fuera una direccion de texto, lo cual no funciona.
             if not coords_ubicacion and ("maps.google" in direccion or "google.com/maps" in direccion or "goo.gl/maps" in direccion):
-                import re
                 match = re.search(r"[?&]q=(-?\d+\.\d+)[,%2C\s]+(-?\d+\.\d+)", direccion)
                 if not match:
                     match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", direccion)
