@@ -594,6 +594,7 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .btn-proceso {{ background:var(--proceso); }}
 .btn-listo {{ background:var(--listo); }}
 .btn-entregado {{ background:#475569; }}
+.btn-copiar {{ background:#0ea5e9; width:100%; margin-top:4px; }}
 .vacio {{ text-align:center; color:var(--tenue); padding:80px 20px; font-size:1.2rem; }}
 </style></head><body>
 <div class='barra'>
@@ -659,6 +660,10 @@ function tarjeta(p){{
   if(p.estado==='nuevo')   btn=`<button class='btn btn-proceso' onclick="cambiar(${{p.id}},'en_proceso')">Empezar</button>`;
   if(p.estado==='en_proceso') btn=`<button class='btn btn-listo' onclick="cambiar(${{p.id}},'listo')">Marcar listo</button>`;
   if(p.estado==='listo')   btn=`<button class='btn btn-entregado' onclick="cambiar(${{p.id}},'entregado')">Entregar</button>`;
+  // Boton de copiar para repartidores: solo en pedidos de envio
+  const btnCopiar = p.tipo_entrega==='envio'
+    ? `<button class='btn btn-copiar' onclick='copiarReparto(${{p.id}})'>📋 Copiar p/ repartidor</button>`
+    : '';
   return `<div class='card ${{clase}} ${{flash}}' data-id='${{p.id}}'>
     <div class='card-top'><div class='num'>#${{p.id}}</div>
       <div class='tiempo ${{urgente}}'>${{min}} min</div></div>
@@ -667,7 +672,55 @@ function tarjeta(p){{
     <ul class='items'>${{items}}</ul>
     ${{nota}}
     <div class='acciones'>${{btn}}</div>
+    ${{btnCopiar}}
   </div>`;
+}}
+
+// Guardamos los pedidos en memoria para armar el mensaje al copiar
+let pedidosMem={{}};
+
+function copiarReparto(id){{
+  const p=pedidosMem[id];
+  if(!p) return;
+  const lineas=[];
+  lineas.push(`🛵 *PEDIDO #${{p.id}} - ENVÍO*`);
+  lineas.push('');
+  lineas.push(`👤 ${{p.nombre_cliente||'Cliente'}}`);
+  lineas.push(`📍 ${{p.direccion||'(sin dirección)'}}`);
+  lineas.push(`📞 ${{p.telefono||''}}`);
+  lineas.push('');
+  lineas.push('🍽️ *Pedido:*');
+  (p.items||[]).forEach(i=> lineas.push(`  • ${{i.cantidad}}x ${{i.nombre}}`));
+  if(p.notas) lineas.push(`\\n📝 Notas: ${{p.notas}}`);
+  lineas.push('');
+  lineas.push(`💰 Total: $${{Number(p.total).toFixed(2)}}`);
+  lineas.push(`💵 Pago: ${{p.metodo_pago||'Efectivo'}}`);
+  const texto=lineas.join('\\n');
+
+  // Copiar al portapapeles
+  if(navigator.clipboard && navigator.clipboard.writeText){{
+    navigator.clipboard.writeText(texto).then(()=>avisoCopiado(id))
+      .catch(()=>copiarFallback(texto,id));
+  }} else {{
+    copiarFallback(texto,id);
+  }}
+}}
+
+function copiarFallback(texto,id){{
+  const ta=document.createElement('textarea');
+  ta.value=texto; ta.style.position='fixed'; ta.style.opacity='0';
+  document.body.appendChild(ta); ta.select();
+  try{{ document.execCommand('copy'); avisoCopiado(id); }}catch(e){{}}
+  document.body.removeChild(ta);
+}}
+
+function avisoCopiado(id){{
+  const card=document.querySelector(`.card[data-id='${{id}}'] .btn-copiar`);
+  if(!card) return;
+  const orig=card.textContent;
+  card.textContent='✅ ¡Copiado! Pégalo en el grupo';
+  card.style.background='#22c55e';
+  setTimeout(()=>{{ card.textContent=orig; card.style.background=''; }},2500);
 }}
 
 async function cargar(){{
@@ -675,6 +728,9 @@ async function cargar(){{
     const r=await fetch(`/admin/${{PHONE}}/cocina/datos?pwd=${{PWD}}`);
     const data=await r.json();
     const activos=data.filter(p=>['nuevo','en_proceso','listo'].includes(p.estado));
+    // Guardar en memoria para el boton de copiar
+    pedidosMem={{}};
+    activos.forEach(p=> pedidosMem[p.id]=p);
     document.getElementById('num-activos').textContent=activos.length;
 
     // Detectar pedidos nuevos para sonar alerta
