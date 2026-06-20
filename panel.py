@@ -331,10 +331,6 @@ async def panel_config_get(phone_id: str, pwd: str = "", guardado: str = ""):
           <input type='number' name='tiempo_envio_min' value='{v("tiempo_envio_min","40")}' min='1'>
         </div>
         <div>
-          <label>Costo de envío ($)</label>
-          <input type='number' name='costo_envio' value='{v("costo_envio","0")}' min='0' step='0.50'>
-        </div>
-        <div>
           <label>Pedido mínimo para envío ($)</label>
           <input type='number' name='pedido_minimo' value='{v("pedido_minimo","0")}' min='0' step='0.50'>
         </div>
@@ -374,7 +370,6 @@ async def panel_config_post(
     metodos_pago: str = Form("Efectivo"),
     tiempo_recoger_min: int = Form(20),
     tiempo_envio_min: int = Form(40),
-    costo_envio: float = Form(0),
     pedido_minimo: float = Form(0),
 ):
     import json as _json
@@ -405,7 +400,6 @@ async def panel_config_post(
         "metodos_pago":        metodos_pago.strip(),
         "tiempo_recoger_min":  tiempo_recoger_min,
         "tiempo_envio_min":    tiempo_envio_min,
-        "costo_envio":         costo_envio,
         "pedido_minimo":       pedido_minimo,
         "horarios_json":       horarios_json,
     }
