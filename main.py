@@ -1237,7 +1237,10 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
         @tool
         def agregar_al_carrito(nombre_producto: str, cantidad: int = 1) -> str:
             """Agrega un producto al carrito del cliente.
-            nombre_producto: nombre exacto o aproximado del producto segun el menu.
+            nombre_producto: copia TEXTUALMENTE las palabras que el cliente usó
+            para nombrar el producto. Por ejemplo, si el cliente dice "quiero 2
+            que me ves", pasa nombre_producto="que me ves" — NUNCA lo cambies
+            por una categoría como "tacos" ni inventes un nombre distinto.
             cantidad: cuantos quiere (default 1).
             IMPORTANTE: si el cliente menciona un producto generico que tiene
             varias variantes en el menu (ej. 'volcán' cuando hay Volcán de
@@ -1258,8 +1261,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                     f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in coincidencias
                 )
                 return (
-                    f"'{nombre_producto}' tiene varias opciones en el menú, "
-                    f"pregúntale al cliente cuál de estas quiere (NO elijas tú):\n{opciones}"
+                    f"Tenemos varias opciones, ¿cuál te gustaría? 😊\n{opciones}"
                 )
 
             item = coincidencias[0]
