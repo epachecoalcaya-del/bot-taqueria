@@ -455,23 +455,36 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 tipo_entrega = sesion["tipo_entrega"]
                 nombre_cl    = sesion["nombre_cliente"]
                 direccion    = sesion["direccion_entrega"]
-                notas        = sesion.get("notas_pedido", "")
+                notas_raw    = sesion.get("notas_pedido", "")
                 costo_envio_real = sesion.get("costo_envio_calc", 0) or costo_envio
                 total        = _calcular_total(carrito)
                 total_con_envio = total + (costo_envio_real if tipo_entrega == "envio" else 0)
+
+                # Extraer el metodo de pago si viene en el prefijo [PAGO:..]
+                # (solo aplica a envios, ver fase "pago" mas arriba).
+                metodo_pago_usado = ""
+                notas = notas_raw
+                if notas_raw.startswith("[PAGO:"):
+                    cierre = notas_raw.find("]")
+                    if cierre != -1:
+                        metodo_pago_usado = notas_raw[6:cierre]
+                        notas = notas_raw[cierre + 1:].strip()
 
                 pedido_id = db.guardar_pedido(
                     negocio_id=negocio_id, telefono=telefono,
                     nombre_cliente=nombre_cl, items=carrito,
                     total=total_con_envio, tipo_entrega=tipo_entrega,
                     direccion=direccion, notas=notas,
+                    metodo_pago=metodo_pago_usado,
                 )
                 tiempo = tiempo_env if tipo_entrega == "envio" else tiempo_rec
                 notas_linea = f"📝 {notas}\n" if notas else ""
+                pago_linea = f"💳 Pago: *{metodo_pago_usado}*\n" if metodo_pago_usado else ""
                 resp = (
                     f"✅ *¡Pedido #{pedido_id} confirmado!*\n\n"
                     f"👤 *{nombre_cl}*\n"
                     f"{'🛵 Envío a: ' + direccion if tipo_entrega == 'envio' else '🏪 Para recoger en el local'}\n"
+                    f"{pago_linea}"
                     f"{notas_linea}"
                     f"⏱ Tiempo estimado: *{tiempo} minutos*\n"
                     f"💰 Total: *{_fmt_precio(total_con_envio)}*\n\n"
@@ -484,7 +497,8 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                         f"Nuevo pedido #{pedido_id} en {nombre_neg}",
                         _html_correo_pedido(
                             nombre_neg, nombre_cl, telefono, carrito,
-                            total_con_envio, tipo_entrega, direccion, metodos_pago, notas,
+                            total_con_envio, tipo_entrega, direccion,
+                            metodo_pago_usado or metodos_pago, notas,
                         ),
                     )
                 db.limpiar_sesion(llave)
@@ -551,18 +565,37 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 carrito      = sesion["carrito"]
                 tipo_entrega = sesion["tipo_entrega"]
                 direccion    = sesion["direccion_entrega"]
+
+                # Si es ENVÍO, antes del resumen final preguntamos el método
+                # de pago (el dueño confirmó que pide el pago por adelantado
+                # para pedidos a domicilio). Si es para recoger, se salta este
+                # paso — el cliente paga al llegar al local.
+                if tipo_entrega == "envio":
+                    metodos_lista = ", ".join(m.strip() for m in metodos_pago.split(","))
+                    resp = (
+                        f"Para pedidos con envío a domicilio pedimos el pago por adelantado.\n\n"
+                        f"¿Cómo deseas pagar? Opciones: *{metodos_lista}*"
+                    )
+                    db.guardar_sesion(llave, historial, fase_pedido="pago",
+                                      nombre_cliente=nombre_cl, carrito=carrito)
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="pago",
+                                      nombre_cliente=nombre_cl, carrito=carrito)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Nombre capturado: {nombre_cl}, pidiendo método de pago.")
+                    return
+
+                # Recoger: no se pregunta metodo de pago, va directo al resumen.
                 notas        = sesion.get("notas_pedido", "")
-                costo_envio_real = sesion.get("costo_envio_calc", 0) or costo_envio
                 total        = _calcular_total(carrito)
-                total_con_envio = total + (costo_envio_real if tipo_entrega == "envio" else 0)
-                resumen = _formato_carrito(carrito, costo_envio_real if tipo_entrega == "envio" else 0)
+                resumen = _formato_carrito(carrito)
                 notas_linea = f"📝 *Notas:* {notas}\n" if notas else ""
                 resp = (
                     f"📋 *Resumen de tu pedido*\n"
                     f"━━━━━━━━━━━━━━\n"
                     f"{resumen}\n\n"
                     f"👤 *Nombre:* {nombre_cl}\n"
-                    f"{'🛵 *Envío a:* ' + direccion if tipo_entrega == 'envio' else '🏪 *Para recoger* en el local'}\n"
+                    f"🏪 *Para recoger* en el local\n"
                     f"{notas_linea}\n"
                     f"¿Todo está bien? Responde:\n"
                     f"✅ *SÍ* para confirmar\n"
@@ -577,14 +610,84 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 print(f"   [{nombre_neg}] Nombre capturado: {nombre_cl}, mostrando resumen.")
                 return
 
-        # FASE: direccion — esperando dirección de envío
+        # FASE: pago — esperando metodo de pago (solo para pedidos de envio)
+        if fase == "pago":
+            metodos_validos = [m.strip().lower() for m in metodos_pago.split(",")]
+            metodo_elegido = None
+            for m in metodos_validos:
+                if m in texto_low:
+                    metodo_elegido = m.title()
+                    break
+            if not metodo_elegido:
+                # Tambien aceptamos sinonimos comunes
+                if any(p in texto_low for p in ["efect", "cash"]):
+                    metodo_elegido = "Efectivo"
+                elif any(p in texto_low for p in ["transf", "deposito", "spei"]):
+                    metodo_elegido = "Transferencia"
+                elif any(p in texto_low for p in ["tarjeta", "card", "credito", "débito", "debito"]):
+                    metodo_elegido = "Tarjeta"
+
+            if metodo_elegido:
+                carrito      = sesion["carrito"]
+                nombre_cl    = sesion["nombre_cliente"]
+                direccion    = sesion["direccion_entrega"]
+                notas        = sesion.get("notas_pedido", "")
+                costo_envio_real = sesion.get("costo_envio_calc", 0) or costo_envio
+                total        = _calcular_total(carrito)
+                total_con_envio = total + costo_envio_real
+                resumen = _formato_carrito(carrito, costo_envio_real)
+                notas_linea = f"📝 *Notas:* {notas}\n" if notas else ""
+                resp = (
+                    f"📋 *Resumen de tu pedido*\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"{resumen}\n\n"
+                    f"👤 *Nombre:* {nombre_cl}\n"
+                    f"🛵 *Envío a:* {direccion}\n"
+                    f"💳 *Pago:* {metodo_elegido}\n"
+                    f"{notas_linea}\n"
+                    f"¿Todo está bien? Responde:\n"
+                    f"✅ *SÍ* para confirmar\n"
+                    f"❌ *NO* para modificar"
+                )
+                # Guardamos el metodo de pago dentro de notas_pedido con un
+                # prefijo reconocible (no hay columna dedicada para esto en
+                # la sesion). Se extrae despues al confirmar el pedido.
+                notas_con_pago = f"[PAGO:{metodo_elegido}] {notas}".strip()
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="confirmando",
+                                  carrito=carrito, notas_pedido=notas_con_pago)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Método de pago: {metodo_elegido}, mostrando resumen.")
+                return
+            else:
+                metodos_lista = ", ".join(m.strip() for m in metodos_pago.split(","))
+                resp = f"No reconocí ese método de pago. Por favor elige una opción: *{metodos_lista}*"
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="pago", carrito=carrito)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                return
         if fase == "direccion":
             direccion = texto.strip()
+
+            # Si el cliente PEGA un link de Google Maps como texto (en vez de
+            # usar el boton nativo de "Compartir ubicacion" de WhatsApp),
+            # extraemos las coordenadas del link con regex y lo tratamos
+            # igual que una ubicacion GPS real — evita geocodificar la URL
+            # cruda como si fuera una direccion de texto, lo cual no funciona.
+            if not coords_ubicacion and ("maps.google" in direccion or "google.com/maps" in direccion or "goo.gl/maps" in direccion):
+                import re
+                match = re.search(r"[?&]q=(-?\d+\.\d+)[,%2C\s]+(-?\d+\.\d+)", direccion)
+                if not match:
+                    match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", direccion)
+                if match:
+                    coords_ubicacion = (float(match.group(1)), float(match.group(2)))
+                    print(f"   [{nombre_neg}] Coordenadas extraídas de link de Maps: {coords_ubicacion}")
+
             # Si el cliente comparte su ubicacion GPS (tipo "location" de
-            # WhatsApp), usamos las coordenadas exactas directo — es mas
-            # preciso que pedirle que escriba la direccion, y mas rapido
-            # (sin geocoding de texto). Guardamos un texto legible para el
-            # resumen y el correo al dueno.
+            # WhatsApp, o un link de Maps con coordenadas extraidas arriba),
+            # usamos las coordenadas exactas directo — es mas preciso que
+            # pedirle que escriba la direccion, y mas rapido (sin geocoding
+            # de texto). Guardamos un texto legible para el resumen y correo.
             if coords_ubicacion:
                 direccion = "📍 Ubicación compartida por WhatsApp"
                 costo_calculado = costo_envio
@@ -596,11 +699,12 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                         costo_calculado = resultado["costo"]
                         km = resultado["km"]
                         aviso_envio = f"\n_Distancia: {km} km — Envío: {_fmt_precio(costo_calculado)}_"
-                        # Guardamos tambien un link de Google Maps en la
-                        # direccion para que el dueño/repartidor pueda abrirla
-                        # directo, ademas de las coordenadas.
+                        # Texto legible con la distancia + link aparte, para
+                        # que no se vea como una URL larga y cruda pegada al
+                        # texto. El link sigue siendo clicable para el dueño
+                        # y los repartidores (correo, botón de cocina, etc.).
                         lat, lng = coords_ubicacion
-                        direccion = f"📍 https://maps.google.com/?q={lat},{lng}"
+                        direccion = f"📍 Ubicación compartida ({km} km)\nhttps://maps.google.com/?q={lat},{lng}"
                     elif "Fuera de cobertura" in resultado["razon"]:
                         resp = (
                             f"Tu ubicación está fuera de nuestra zona de cobertura para envío "
@@ -618,7 +722,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                         # respaldo en vez de trabar al cliente.
                         print(f"   [{nombre_neg}] No se pudo calcular distancia desde ubicación: {resultado['razon']}")
                         lat, lng = coords_ubicacion
-                        direccion = f"📍 https://maps.google.com/?q={lat},{lng}"
+                        direccion = f"📍 Ubicación compartida\nhttps://maps.google.com/?q={lat},{lng}"
 
                 resp = f"¿A nombre de quién registramos el pedido?{aviso_envio}"
                 db.guardar_sesion(llave, historial, fase_pedido="nombre",
@@ -1038,16 +1142,18 @@ REGLAS IMPORTANTES:
                 enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
             elif tipo_servicio == "envio":
                 resp_cierre = (
-                    f"{_formato_carrito(carrito_estado, costo_envio)}\n\n"
+                    f"{_formato_carrito(carrito_estado)}\n"
+                    "_El costo de envío se calculará según tu dirección._\n\n"
                     "¿Cuál es tu dirección de entrega? 📍 También puedes compartir tu ubicación con el clip de WhatsApp para mayor precisión."
                 )
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion",
                                   tipo_entrega="envio", carrito=carrito_estado)
                 enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
             else:
-                # ambos: preguntar
+                # ambos: preguntar primero, NUNCA mostrar costo de envio aqui
+                # porque todavia no sabemos si el cliente eligio envio.
                 resp_cierre = (
-                    f"{_formato_carrito(carrito_estado, costo_envio)}\n\n"
+                    f"{_formato_carrito(carrito_estado)}\n\n"
                     "¿Es para *recoger en el local* o *envío a domicilio*?"
                 )
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo",
