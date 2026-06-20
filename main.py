@@ -599,13 +599,34 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                     nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
                     db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="nombre",
                                       tipo_entrega="recoger", carrito=carrito)
-                else:
-                    resp = "¿Cuál es tu dirección de entrega?"
-                    db.guardar_sesion(llave, historial, fase_pedido="direccion",
-                                      tipo_entrega="envio", carrito=carrito)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    return
+
+                # Validar pedido minimo ANTES de pasar a pedir direccion —
+                # el minimo solo aplica a envio, asi que es aqui donde
+                # corresponde checarlo, no antes (cuando aun no sabiamos
+                # si era recoger o envio).
+                total_actual = _calcular_total(carrito)
+                if pedido_min > 0 and total_actual < pedido_min:
+                    falta = pedido_min - total_actual
+                    resumen = _formato_carrito(carrito)
+                    resp = (
+                        f"{resumen}\n\n"
+                        f"_Para envío a domicilio el pedido mínimo es de {_fmt_precio(pedido_min)}. "
+                        f"Te faltan {_fmt_precio(falta)}._\n\n"
+                        f"¿Quieres agregar algo más, o prefieres pasar a recoger tu pedido sin mínimo?"
+                    )
                     nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
-                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion",
-                                      tipo_entrega="envio", carrito=carrito)
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo", carrito=carrito)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    return
+
+                resp = "¿Cuál es tu dirección de entrega?"
+                db.guardar_sesion(llave, historial, fase_pedido="direccion",
+                                  tipo_entrega="envio", carrito=carrito)
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion",
+                                  tipo_entrega="envio", carrito=carrito)
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
                 return
 
@@ -651,7 +672,10 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
             varias variantes en el menu (ej. 'volcán' cuando hay Volcán de
             Pastor/Bistec/Sirloin/Chorizo, o 'agua' cuando hay Agua 1L y ½L),
             esta herramienta te devolverá la lista de opciones — debes
-            preguntarle al cliente cuál quiere en vez de elegir tú."""
+            preguntarle al cliente cuál quiere en vez de elegir tú.
+            El resultado SIEMPRE incluye el carrito completo actualizado con
+            precios y subtotal — usa ese texto tal cual en tu respuesta al
+            cliente, no lo reescribas ni lo resumas tú mismo."""
             coincidencias = _buscar_coincidencias(nombre_producto, menu)
 
             if not coincidencias:
@@ -668,16 +692,26 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                 )
 
             item = coincidencias[0]
+            ya_existia = False
             for c in carrito_estado:
                 if c["nombre"] == item["nombre"]:
                     c["cantidad"] += max(1, cantidad)
-                    return f"Actualizado: {c['cantidad']}x {item['nombre']} en tu carrito."
-            carrito_estado.append({
-                "nombre":   item["nombre"],
-                "precio":   float(item["precio"]),
-                "cantidad": max(1, cantidad),
-            })
-            return f"Agregado: {cantidad}x {item['nombre']} (${item['precio']:.2f} c/u) 🌮"
+                    ya_existia = True
+                    break
+            if not ya_existia:
+                carrito_estado.append({
+                    "nombre":   item["nombre"],
+                    "precio":   float(item["precio"]),
+                    "cantidad": max(1, cantidad),
+                })
+
+            carrito_txt = _formato_carrito(carrito_estado)
+            subtotal = _calcular_total(carrito_estado)
+            aviso_min = ""
+            if pedido_min > 0 and subtotal < pedido_min:
+                falta = pedido_min - subtotal
+                aviso_min = f"\n\n_Te faltan {_fmt_precio(falta)} para el pedido mínimo de {_fmt_precio(pedido_min)}._"
+            return f"{carrito_txt}{aviso_min}"
 
         @tool
         def quitar_del_carrito(nombre_producto: str) -> str:
@@ -717,17 +751,13 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
             """Llama esta herramienta cuando el cliente diga que ya termino de
             pedir (frases como: 'eso es todo', 'ya es todo', 'eso seria todo',
             'nada mas', 'con eso', 'es todo', etc.). Inicia el flujo de cierre.
-            NO llames agregar_al_carrito antes de esta herramienta en el mismo turno."""
+            NO llames agregar_al_carrito antes de esta herramienta en el mismo turno.
+            NOTA: el pedido minimo (si aplica) se valida despues, una vez que
+            el cliente indique si es para recoger o envio — aqui no se valida
+            porque el minimo solo aplica a pedidos con envio a domicilio."""
             carrito_actual = db.cargar_sesion(llave).get("carrito") or carrito_estado
             if not carrito_actual:
                 return "El carrito está vacío. Pide algo del menú primero."
-            total = _calcular_total(carrito_actual)
-            if pedido_min > 0 and total < pedido_min:
-                return (
-                    f"El pedido mínimo es de ${pedido_min:.2f}. "
-                    f"Tu pedido actual es de ${total:.2f}. "
-                    f"¿Quieres agregar algo más?"
-                )
             return "INICIAR_CIERRE"
 
         tools = [ver_menu, info_producto, agregar_al_carrito, quitar_del_carrito, ver_carrito, guardar_nota, cerrar_pedido]
@@ -753,6 +783,7 @@ REGLAS IMPORTANTES:
 - Cuando el cliente pregunte qué lleva o qué ingredientes tiene un producto, usa SIEMPRE la herramienta info_producto. NUNCA inventes ingredientes ni agregues cosas que no estén en la descripción del menú.
 - Cuando el cliente pida algo especial (sin cilantro, sin cebolla, extra queso, bien cocido, etc.), usa guardar_nota para registrarlo. NUNCA ignores estas instrucciones.
 - NO llames agregar_al_carrito y cerrar_pedido en el mismo mensaje. Si el cliente dice 'es todo' o 'nada más', llama SOLO cerrar_pedido.
+- Cuando agregues uno o varios productos, el resultado de agregar_al_carrito ya trae el carrito completo con precios y subtotal formateado. Usa ESE texto en tu respuesta tal cual (puedes agregar una frase corta antes como "¡Listo! Así va tu pedido:"), NUNCA reescribas la lista de productos tú mismo ni inventes cómo agrupar las cantidades — eso causa errores graves como mostrar productos duplicados o cantidades incorrectas.
 - Si el cliente pide algo que no está en el menú, indícalo claramente y ofrece alternativas.
 - Cuando el cliente diga que ya terminó de pedir (eso es todo / ya es todo / nada más / con eso / etc.), llama cerrar_pedido.
 - Sé breve, amigable y usa emojis con moderación.
@@ -760,7 +791,11 @@ REGLAS IMPORTANTES:
 - Responde siempre en español.
 """
         if not historial:
-            sistema += f"\n\nMensaje de bienvenida sugerido: {bienvenida}"
+            aviso_min_bienvenida = (
+                f" Recuerda que el pedido mínimo para envío a domicilio es de {_fmt_precio(pedido_min)}."
+                if pedido_min > 0 and tipo_servicio in ("envio", "ambos") else ""
+            )
+            sistema += f"\n\nMensaje de bienvenida sugerido: {bienvenida}{aviso_min_bienvenida}"
 
         llm = ChatOpenAI(
             model="gpt-4o-mini",
