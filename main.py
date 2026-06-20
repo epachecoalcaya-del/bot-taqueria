@@ -18,6 +18,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain.tools import tool
 import database as db
+import geo
 
 load_dotenv()
 
@@ -367,6 +368,11 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
         tiempo_rec    = negocio.get("tiempo_recoger_min", 20)
         tiempo_env    = negocio.get("tiempo_envio_min", 40)
         metodos_pago  = negocio.get("metodos_pago", "Efectivo")
+        envio_dinamico = bool(negocio.get("costo_envio_dinamico"))
+        modo_lluvia    = bool(negocio.get("modo_lluvia"))
+        coords_negocio = None
+        if negocio.get("lat") and negocio.get("lng"):
+            coords_negocio = (float(negocio["lat"]), float(negocio["lng"]))
 
         llave   = f"{phone_number_id}_{telefono}"
         sesion  = db.cargar_sesion(llave)
@@ -439,8 +445,9 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                 nombre_cl    = sesion["nombre_cliente"]
                 direccion    = sesion["direccion_entrega"]
                 notas        = sesion.get("notas_pedido", "")
+                costo_envio_real = sesion.get("costo_envio_calc", 0) or costo_envio
                 total        = _calcular_total(carrito)
-                total_con_envio = total + (costo_envio if tipo_entrega == "envio" else 0)
+                total_con_envio = total + (costo_envio_real if tipo_entrega == "envio" else 0)
 
                 pedido_id = db.guardar_pedido(
                     negocio_id=negocio_id, telefono=telefono,
@@ -494,7 +501,8 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                 # El cliente dijo algo que no es SÍ ni NO (saludo, pregunta,
                 # etc.) — le recordamos que tiene un pedido pendiente en vez
                 # de caer al LLM que puede ignorar la fase y hacer cualquier cosa.
-                resumen = _formato_carrito(carrito, costo_envio if sesion.get("tipo_entrega") == "envio" else 0)
+                costo_envio_real = sesion.get("costo_envio_calc", 0) or costo_envio
+                resumen = _formato_carrito(carrito, costo_envio_real if sesion.get("tipo_entrega") == "envio" else 0)
                 resp = (
                     f"Tienes un pedido pendiente de confirmar 👆\n\n"
                     f"{resumen}\n\n"
@@ -533,9 +541,10 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
                 tipo_entrega = sesion["tipo_entrega"]
                 direccion    = sesion["direccion_entrega"]
                 notas        = sesion.get("notas_pedido", "")
+                costo_envio_real = sesion.get("costo_envio_calc", 0) or costo_envio
                 total        = _calcular_total(carrito)
-                total_con_envio = total + (costo_envio if tipo_entrega == "envio" else 0)
-                resumen = _formato_carrito(carrito, costo_envio if tipo_entrega == "envio" else 0)
+                total_con_envio = total + (costo_envio_real if tipo_entrega == "envio" else 0)
+                resumen = _formato_carrito(carrito, costo_envio_real if tipo_entrega == "envio" else 0)
                 notas_linea = f"📝 *Notas:* {notas}\n" if notas else ""
                 resp = (
                     f"📋 *Resumen de tu pedido*\n"
@@ -561,14 +570,51 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str):
         if fase == "direccion":
             direccion = texto.strip()
             if len(direccion) >= 5:
-                resp = "¿A nombre de quién registramos el pedido?"
+                costo_calculado = costo_envio  # fallback: tarifa fija configurada
+                aviso_envio = ""
+
+                if envio_dinamico and coords_negocio:
+                    resultado = geo.calcular_envio_completo(direccion, coords_negocio, lluvia=modo_lluvia)
+                    if resultado["ok"]:
+                        costo_calculado = resultado["costo"]
+                        km = resultado["km"]
+                        aviso_envio = f"\n_Distancia: {km} km — Envío: {_fmt_precio(costo_calculado)}_"
+                    else:
+                        # No se pudo calcular (direccion no encontrada o fuera
+                        # de cobertura): avisamos y pedimos que confirme o
+                        # de una direccion mas precisa, sin trabar el flujo.
+                        if "Fuera de cobertura" in resultado["razon"]:
+                            resp = (
+                                f"Tu dirección está fuera de nuestra zona de cobertura para envío "
+                                f"({resultado['km']} km, máximo 20 km). "
+                                f"¿Prefieres pasar a recoger tu pedido al local?"
+                            )
+                            nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                            db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo", carrito=carrito)
+                            enviar_whatsapp(telefono, resp, token, phone_number_id)
+                            print(f"   [{nombre_neg}] Dirección fuera de cobertura ({resultado['km']} km).")
+                            return
+                        else:
+                            resp = (
+                                "No logré ubicar bien esa dirección. ¿Puedes darme más detalles "
+                                "(calle, número, colonia) para calcular el envío correctamente?"
+                            )
+                            nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                            db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion", carrito=carrito)
+                            enviar_whatsapp(telefono, resp, token, phone_number_id)
+                            print(f"   [{nombre_neg}] No se pudo geocodificar: '{direccion}' — {resultado['razon']}")
+                            return
+
+                resp = f"¿A nombre de quién registramos el pedido?{aviso_envio}"
                 db.guardar_sesion(llave, historial, fase_pedido="nombre",
-                                  direccion_entrega=direccion, carrito=carrito)
+                                  direccion_entrega=direccion, carrito=carrito,
+                                  costo_envio_calc=costo_calculado)
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="nombre",
-                                  direccion_entrega=direccion, carrito=carrito)
+                                  direccion_entrega=direccion, carrito=carrito,
+                                  costo_envio_calc=costo_calculado)
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
-                print(f"   [{nombre_neg}] Dirección capturada: {direccion[:40]}")
+                print(f"   [{nombre_neg}] Dirección capturada: {direccion[:40]} — envío: ${costo_calculado}")
                 return
 
         # FASE: tipo — esperando si es para recoger o envío

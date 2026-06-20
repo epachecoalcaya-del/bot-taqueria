@@ -175,6 +175,38 @@ async def toggle_cerrado_hoy(phone_id: str, pwd: str = "", estado: int = 0):
     return RedirectResponse(f"/admin/{phone_id}/config?pwd={pwd}&guardado=1", status_code=303)
 
 
+def _alerta_modo_lluvia(negocio: dict, phone_id: str, pwd: str) -> str:
+    if not negocio.get("costo_envio_dinamico"):
+        return ""  # solo aplica si el negocio usa tarifa dinamica por distancia
+    lluvia = negocio.get("modo_lluvia", False)
+    if lluvia:
+        return (
+            f"<div class='alerta-cerrado' style='background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8'>"
+            f"🌧️ <b>Modo lluvia activado</b> — se está cobrando la tarifa de envío con recargo por lluvia. "
+            f"<a href='/admin/{phone_id}/modo_lluvia?pwd={pwd}&estado=0' "
+            f"style='color:#1d4ed8;font-weight:600'>Desactivar</a></div>"
+        )
+    return (
+        f"<div style='text-align:right;margin-bottom:12px'>"
+        f"<a href='/admin/{phone_id}/modo_lluvia?pwd={pwd}&estado=1' "
+        f"class='btn' style='background:#0ea5e9;color:#fff'>🌧️ Activar modo lluvia</a>"
+        f"&nbsp;"
+        f"<span style='font-size:.8rem;color:#94a3b8'>Si está lloviendo, activa esto para cobrar la tarifa de envío con recargo.</span>"
+        f"</div>"
+    )
+
+@router.get("/admin/{phone_id}/modo_lluvia")
+async def toggle_modo_lluvia(phone_id: str, pwd: str = "", estado: int = 0):
+    negocio = _neg(phone_id)
+    if not negocio or not _auth(negocio, pwd):
+        return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
+    lluvia = estado == 1
+    db.actualizar_negocio(phone_id, {"modo_lluvia": lluvia})
+    from main import _negocios_cache
+    _negocios_cache[phone_id]["modo_lluvia"] = lluvia
+    return RedirectResponse(f"/admin/{phone_id}/config?pwd={pwd}&guardado=1", status_code=303)
+
+
 # ── CONFIGURACION ─────────────────────────────────────────────────────────────
 
 @router.get("/admin/{phone_id}/config", response_class=HTMLResponse)
@@ -217,6 +249,7 @@ async def panel_config_get(phone_id: str, pwd: str = "", guardado: str = ""):
     </nav>
     {aviso}
     {_alerta_cerrado_hoy(negocio, phone_id, pwd)}
+    {_alerta_modo_lluvia(negocio, phone_id, pwd)}
     <form method='post' action='/admin/{phone_id}/config?pwd={pwd}'>
     <div class='card'>
       <h2>Datos del negocio</h2>

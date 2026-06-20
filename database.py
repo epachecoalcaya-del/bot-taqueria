@@ -113,6 +113,7 @@ def cargar_sesion(llave: str) -> dict:
                 "direccion_entrega":      row.get("direccion_entrega") or "",
                 "nombre_cliente":         row.get("nombre_cliente") or "",
                 "notas_pedido":           row.get("notas_pedido") or "",
+                "costo_envio_calc":       float(row.get("costo_envio_calc") or 0),
             }
     except Exception as e:
         print(f"!!! DB error en cargar_sesion ({llave}): {e}")
@@ -120,6 +121,7 @@ def cargar_sesion(llave: str) -> dict:
         "historial": [], "esperando_confirmacion": False,
         "carrito": [], "fase_pedido": "", "tipo_entrega": "",
         "direccion_entrega": "", "nombre_cliente": "", "notas_pedido": "",
+        "costo_envio_calc": 0,
     }
 
 
@@ -133,6 +135,7 @@ def guardar_sesion(
     direccion_entrega: Optional[str] = None,
     nombre_cliente: Optional[str] = None,
     notas_pedido: Optional[str] = None,
+    costo_envio_calc: Optional[float] = None,
 ):
     """Guarda o actualiza la sesion. Los campos opcionales solo se
     actualizan si se pasan explicitamente (no None)."""
@@ -155,6 +158,8 @@ def guardar_sesion(
             datos["nombre_cliente"] = nombre_cliente
         if notas_pedido is not None:
             datos["notas_pedido"] = notas_pedido
+        if costo_envio_calc is not None:
+            datos["costo_envio_calc"] = costo_envio_calc
         _get_client().table("pedidos_sesiones").upsert(datos).execute()
     except Exception as e:
         print(f"!!! DB error en guardar_sesion ({llave}): {e}")
@@ -166,7 +171,7 @@ def limpiar_sesion(llave: str):
     guardar_sesion(
         llave, [], False,
         carrito=[], fase_pedido="", tipo_entrega="",
-        direccion_entrega="", nombre_cliente="",
+        direccion_entrega="", nombre_cliente="", costo_envio_calc=0,
     )
 
 
