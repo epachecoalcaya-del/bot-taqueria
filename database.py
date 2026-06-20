@@ -114,6 +114,7 @@ def cargar_sesion(llave: str) -> dict:
                 "nombre_cliente":         row.get("nombre_cliente") or "",
                 "notas_pedido":           row.get("notas_pedido") or "",
                 "costo_envio_calc":       float(row.get("costo_envio_calc") or 0),
+                "updated_at":             row.get("updated_at") or "",
             }
     except Exception as e:
         print(f"!!! DB error en cargar_sesion ({llave}): {e}")
@@ -121,7 +122,7 @@ def cargar_sesion(llave: str) -> dict:
         "historial": [], "esperando_confirmacion": False,
         "carrito": [], "fase_pedido": "", "tipo_entrega": "",
         "direccion_entrega": "", "nombre_cliente": "", "notas_pedido": "",
-        "costo_envio_calc": 0,
+        "costo_envio_calc": 0, "updated_at": "",
     }
 
 
