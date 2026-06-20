@@ -168,8 +168,35 @@ def notificar_dueno(email: str, asunto: str, html_body: str):
 
 # ── HELPERS DEL CARRITO ──────────────────────────────────────────────────────
 
+# Promociones de tacos — Super Tacos George's (confirmadas con el dueño).
+# Cada entrada define como se cobra un PAQUETE de N piezas a precio fijo;
+# las piezas que sobran fuera del paquete se cobran a precio individual.
+# Ej: Bistec 3x$60 -> si piden 7, son 2 paquetes de 3 ($120) + 1 individual
+# ($25) = $145, no 7 x $25 = $175.
+_PROMOS_TACOS = {
+    "Taco de Pastor":  {"paquete": 2, "precio_paquete": 26.00},  # 2x1: paga 1 ($26), lleva 2
+    "Taco de Bistec":  {"paquete": 3, "precio_paquete": 60.00},  # 3x$60
+    "Taco de Sirloin": {"paquete": 2, "precio_paquete": 50.00},  # 2x$50
+    "Taco de Chorizo": {"paquete": 3, "precio_paquete": 55.00},  # 3x$55
+}
+
+
+def _precio_linea(nombre: str, cantidad: int, precio_individual: float) -> float:
+    """Calcula el precio de una linea del carrito, aplicando la promo por
+    paquete si el producto tiene una (ver _PROMOS_TACOS). Las piezas que
+    no completan un paquete se cobran a precio individual normal."""
+    promo = _PROMOS_TACOS.get(nombre)
+    if not promo:
+        return precio_individual * cantidad
+    tam_paquete = promo["paquete"]
+    precio_paquete = promo["precio_paquete"]
+    paquetes_completos = cantidad // tam_paquete
+    piezas_sueltas = cantidad % tam_paquete
+    return (paquetes_completos * precio_paquete) + (piezas_sueltas * precio_individual)
+
+
 def _calcular_total(carrito: list) -> float:
-    return sum(i["precio"] * i["cantidad"] for i in carrito)
+    return sum(_precio_linea(i["nombre"], i["cantidad"], i["precio"]) for i in carrito)
 
 
 def _formato_carrito(carrito: list, costo_envio: float = 0) -> str:
@@ -177,8 +204,11 @@ def _formato_carrito(carrito: list, costo_envio: float = 0) -> str:
         return "🛒 Tu carrito está vacío."
     lineas = ["🛒 *Tu pedido:*"]
     for i in carrito:
-        subtotal = i["precio"] * i["cantidad"]
-        lineas.append(f"  • {i['cantidad']}x {i['nombre']} — {_fmt_precio(subtotal)}")
+        subtotal = _precio_linea(i["nombre"], i["cantidad"], i["precio"])
+        promo = _PROMOS_TACOS.get(i["nombre"])
+        tiene_promo = promo and i["cantidad"] >= promo["paquete"]
+        etiqueta_promo = " 🎉" if tiene_promo else ""
+        lineas.append(f"  • {i['cantidad']}x {i['nombre']} — {_fmt_precio(subtotal)}{etiqueta_promo}")
     total = _calcular_total(carrito)
     if costo_envio > 0:
         lineas.append(f"  • Envío — {_fmt_precio(costo_envio)}")
@@ -232,7 +262,16 @@ def _formato_menu(items: list) -> str:
         emoji = _emoji_cat(cat)
         lineas.append(f"{emoji} *{cat.upper()}*")
         for p in productos:
-            lineas.append(f"  • *{p['nombre']}* — {_fmt_precio(float(p['precio']))}")
+            precio_txt = _fmt_precio(float(p['precio']))
+            promo = _PROMOS_TACOS.get(p['nombre'])
+            if promo:
+                if promo["paquete"] == 2 and promo["precio_paquete"] == p['precio']:
+                    promo_txt = f" _(2x1)_"
+                else:
+                    promo_txt = f" _({promo['paquete']}x{_fmt_precio(promo['precio_paquete'])})_"
+                lineas.append(f"  • *{p['nombre']}* — {precio_txt}{promo_txt}")
+            else:
+                lineas.append(f"  • *{p['nombre']}* — {precio_txt}")
         if idx < total_cats - 1:
             lineas.append("")
 
@@ -1168,6 +1207,7 @@ Métodos de pago aceptados: {metodos_pago}
 
 REGLAS IMPORTANTES:
 - Usa SIEMPRE la herramienta agregar_al_carrito para añadir productos. NUNCA inventes precios.
+- Algunos tacos tienen promociones por cantidad (ej. Pastor es 2x1, Bistec es 3x$60, etc. — se ven marcadas en el menú). El precio final con la promo ya aplicada se calcula automáticamente y aparece en el carrito que te devuelve la herramienta — tú NUNCA calcules el precio de tacos a mano, solo usa el texto que te da la herramienta.
 - Si el cliente pide un producto genérico que tiene varias variantes (ej. "volcán", "torta", "agua", "hamburguesa", "papa rellena") SIN especificar cuál, y agregar_al_carrito te devuelve una lista de opciones, DEBES preguntarle al cliente cuál variante quiere ANTES de continuar. NUNCA elijas una variante por tu cuenta — eso causa errores graves en el pedido real.
 - Cuando el cliente pregunte qué lleva o qué ingredientes tiene un producto, usa SIEMPRE la herramienta info_producto. NUNCA inventes ingredientes ni agregues cosas que no estén en la descripción del menú.
 - Cuando el cliente pida algo especial (sin cilantro, sin cebolla, extra queso, bien cocido, etc.), usa guardar_nota para registrarlo. NUNCA ignores estas instrucciones.
