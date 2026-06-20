@@ -970,8 +970,24 @@ REGLAS IMPORTANTES:
                     resultado = "Procesando cierre del pedido..."
                 tool_results.append(resultado)
 
+            # Si la UNICA tool llamada en este turno es ver_menu o
+            # info_producto, usamos su resultado DIRECTO como respuesta, sin
+            # pasar por una segunda llamada al modelo. Esto es necesario
+            # porque el modelo tiende a "redactar de nuevo" el menu en sus
+            # propias palabras y pierde el formato (emojis, precios, saltos
+            # de linea) o incluso lo omite por completo — un bug real visto
+            # en produccion. Instrucciones en el prompt no bastan para esto;
+            # se necesita forzarlo a nivel de codigo.
+            tools_llamadas = [tc["name"] for tc in resp_llm.tool_calls]
+            si_respuesta_directa = (
+                len(tools_llamadas) == 1
+                and tools_llamadas[0] in ("ver_menu", "info_producto", "agregar_al_carrito", "ver_carrito")
+                and not iniciar_cierre
+            )
+            if si_respuesta_directa:
+                texto_respuesta = tool_results[0]
             # Segunda llamada al LLM con los resultados de las herramientas
-            if not iniciar_cierre:
+            elif not iniciar_cierre:
                 from langchain_core.messages import ToolMessage
                 msgs_2 = msgs_llm + [resp_llm]
                 for i, tc in enumerate(resp_llm.tool_calls):
