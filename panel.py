@@ -181,9 +181,26 @@ def _alerta_modo_lluvia(negocio: dict, phone_id: str, pwd: str) -> str:
         return ""  # solo aplica si el negocio usa tarifa dinamica por distancia
     lluvia = negocio.get("modo_lluvia", False)
     if lluvia:
+        # Calculamos cuanto tiempo lleva prendido para avisar si se les
+        # olvido apagarlo (red de seguridad: solo es un recordatorio
+        # visual, no se apaga solo).
+        aviso_tiempo = ""
+        activado_en = negocio.get("modo_lluvia_activado_en")
+        if activado_en:
+            try:
+                dt_activado = datetime.datetime.fromisoformat(activado_en.replace("Z", "+00:00"))
+                horas = (datetime.datetime.now(datetime.timezone.utc) - dt_activado).total_seconds() / 3600
+                if horas >= 3:
+                    aviso_tiempo = (
+                        f"<br><span style='font-weight:700'>⚠️ Lleva {horas:.1f} horas prendido — "
+                        f"¿ya dejó de llover? No olvides desactivarlo.</span>"
+                    )
+            except Exception:
+                pass
         return (
             f"<div class='alerta-cerrado' style='background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8'>"
-            f"🌧️ <b>Modo lluvia activado</b> — se está cobrando la tarifa de envío con recargo por lluvia. "
+            f"🌧️ <b>Modo lluvia activado</b> — se está cobrando la tarifa de envío con recargo por lluvia."
+            f"{aviso_tiempo}<br>"
             f"<a href='/admin/{phone_id}/modo_lluvia?pwd={pwd}&estado=0' "
             f"style='color:#1d4ed8;font-weight:600'>Desactivar</a></div>"
         )
@@ -202,9 +219,15 @@ async def toggle_modo_lluvia(phone_id: str, pwd: str = "", estado: int = 0):
     if not negocio or not _auth(negocio, pwd):
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
     lluvia = estado == 1
-    db.actualizar_negocio(phone_id, {"modo_lluvia": lluvia})
+    datos = {"modo_lluvia": lluvia}
+    if lluvia:
+        datos["modo_lluvia_activado_en"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    else:
+        datos["modo_lluvia_activado_en"] = None
+    db.actualizar_negocio(phone_id, datos)
     from main import _negocios_cache
     _negocios_cache[phone_id]["modo_lluvia"] = lluvia
+    _negocios_cache[phone_id]["modo_lluvia_activado_en"] = datos["modo_lluvia_activado_en"]
     return RedirectResponse(f"/admin/{phone_id}/config?pwd={pwd}&guardado=1", status_code=303)
 
 
@@ -512,25 +535,38 @@ async def panel_pedidos(phone_id: str, pwd: str = ""):
         if not items: return "—"
         return ", ".join(f"{i['cantidad']}x {i['nombre']}" for i in items)
 
-    filas = "".join(
-        f"<tr>"
-        f"<td>#{p['id']}</td>"
-        f"<td>{p.get('nombre_cliente','—')}</td>"
-        f"<td>{p.get('telefono','—')}</td>"
-        f"<td>{fmt_items(p.get('items',[]))}</td>"
-        f"<td>${float(p.get('total',0)):.2f}</td>"
-        f"<td>{'🛵 Envío' if p.get('tipo_entrega')=='envio' else '🏪 Recoger'}</td>"
-        f"<td>{badge(p.get('estado','nuevo'))}</td>"
-        f"<td>{p.get('created_at','')[:16].replace('T',' ')}</td>"
-        f"<td><form method='post' action='/admin/{phone_id}/pedidos/{p['id']}/estado?pwd={pwd}'>"
-        f"<select name='estado' onchange='this.form.submit()' style='font-size:.8rem;padding:4px'>"
-        + "".join(
-            f"<option value='{s}' {'selected' if p.get('estado')==s else ''}>{s.replace('_',' ').title()}</option>"
-            for s in ["nuevo","en_proceso","listo","entregado","cancelado"]
+    def fila(p):
+        es_pendiente_pago = p.get("estado") == "pendiente_pago"
+        btn_pago = ""
+        if es_pendiente_pago:
+            btn_pago = (
+                f"<form method='post' action='/admin/{phone_id}/pedidos/{p['id']}/marcar_pagado?pwd={pwd}' "
+                f"style='display:inline;margin-left:4px' "
+                f"onsubmit=\"return confirm('¿Confirmas que el pago de este pedido SÍ se recibió? Esto lo manda a cocina.')\">"
+                f"<button type='submit' style='font-size:.75rem;padding:4px 8px;background:#16a34a;color:#fff;"
+                f"border:none;border-radius:6px;cursor:pointer'>💰 Marcar pagado</button></form>"
+            )
+        return (
+            f"<tr>"
+            f"<td>#{p['id']}</td>"
+            f"<td>{p.get('nombre_cliente','—')}</td>"
+            f"<td>{p.get('telefono','—')}</td>"
+            f"<td>{fmt_items(p.get('items',[]))}</td>"
+            f"<td>${float(p.get('total',0)):.2f}</td>"
+            f"<td>{'🛵 Envío' if p.get('tipo_entrega')=='envio' else '🏪 Recoger'}</td>"
+            f"<td>{badge(p.get('estado','nuevo'))}</td>"
+            f"<td>{p.get('created_at','')[:16].replace('T',' ')}</td>"
+            f"<td><form method='post' action='/admin/{phone_id}/pedidos/{p['id']}/estado?pwd={pwd}' style='display:inline'>"
+            f"<select name='estado' onchange='this.form.submit()' style='font-size:.8rem;padding:4px'>"
+            + "".join(
+                f"<option value='{s}' {'selected' if p.get('estado')==s else ''}>{s.replace('_',' ').title()}</option>"
+                for s in ["nuevo","en_proceso","listo","entregado","cancelado","pendiente_pago"]
+            )
+            + f"</select></form>{btn_pago}</td></tr>"
         )
-        + f"</select></form></td></tr>"
-        for p in pedidos
-    ) or "<tr><td colspan='9' style='color:#94a3b8;text-align:center;padding:20px'>Sin pedidos aún</td></tr>"
+
+    filas = "".join(fila(p) for p in pedidos) or \
+        "<tr><td colspan='9' style='color:#94a3b8;text-align:center;padding:20px'>Sin pedidos aún</td></tr>"
 
     return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
     <meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -565,7 +601,44 @@ async def panel_pedido_estado(phone_id: str, pedido_id: int, pwd: str = "",
     negocio = _neg(phone_id)
     if not negocio or not _auth(negocio, pwd):
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
+
+    estado_anterior = None
+    if estado == "listo":
+        # Solo necesitamos consultar el pedido si vamos a avisar, para no
+        # gastar una consulta extra en cada cambio de estado normal.
+        pedido_actual = db.obtener_pedido_por_id(pedido_id)
+        estado_anterior = pedido_actual.get("estado") if pedido_actual else None
+
     db.actualizar_estado_pedido(pedido_id, estado)
+
+    if estado == "listo" and estado_anterior != "listo" and pedido_actual:
+        from main import enviar_whatsapp
+        tipo_entrega = pedido_actual.get("tipo_entrega", "recoger")
+        if tipo_entrega == "envio":
+            msg = (
+                f"🛵 *¡Tu pedido #{pedido_id} va en camino!*\n\n"
+                f"Nuestro repartidor ya salió hacia tu dirección. 🌮"
+            )
+        else:
+            msg = (
+                f"✅ *¡Tu pedido #{pedido_id} ya está listo!*\n\n"
+                f"Puedes pasar a recogerlo cuando gustes. 🌮"
+            )
+        enviar_whatsapp(pedido_actual["telefono"], msg, negocio["whatsapp_token"], phone_id)
+
+    return RedirectResponse(f"/admin/{phone_id}/pedidos?pwd={pwd}", status_code=303)
+
+
+@router.post("/admin/{phone_id}/pedidos/{pedido_id}/marcar_pagado")
+async def panel_marcar_pagado(phone_id: str, pedido_id: int, pwd: str = ""):
+    """Respaldo manual: si el pago con Mercado Pago no se confirma solo
+    (link fallido, el cliente pago distinto, demora del webhook, etc.),
+    el dueño puede destrabar el pedido a mano desde aqui — lo pasa a
+    'nuevo' (aparece en cocina) y marca el pago como recibido."""
+    negocio = _neg(phone_id)
+    if not negocio or not _auth(negocio, pwd):
+        return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
+    db.marcar_pago_manual(pedido_id)
     return RedirectResponse(f"/admin/{phone_id}/pedidos?pwd={pwd}", status_code=303)
 
 
