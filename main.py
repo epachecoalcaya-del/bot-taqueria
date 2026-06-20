@@ -327,10 +327,28 @@ def _normalizar_txt(s: str) -> str:
     import unicodedata
     s = unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode()
     # Tolerar variantes de formato para litros: "1L", "1 Lt", "1 litro",
-    # "1lt" todas se normalizan igual, para que coincidan sin importar como
-    # el cliente (o el LLM al copiarlo) lo haya escrito.
+    # "1lt", "medio litro", "litro" (sin numero, asumido como 1) todas se
+    # normalizan igual, para que coincidan sin importar como el cliente
+    # (o el LLM al copiarlo) lo haya escrito. El orden importa: primero
+    # "medio litro" -> 1/2, luego litro con digito explicito, luego litro
+    # suelto sin digito ni "medio" -> se asume 1 litro.
+    s = re.sub(r'\bmedio\s*l(?:t|ts|itro|itros)?\b', '1/2lt', s)
     s = re.sub(r'(\d)\s*l(?:t|ts|itro|itros)?\b', r'\1lt', s)
+    s = re.sub(r'(?<!\d)\bl(?:itro|itros)\b', '1lt', s)
     return s
+
+
+_PALABRAS_RELLENO = {"de", "del", "la", "el", "los", "las", "un", "una", "unos", "unas"}
+
+
+def _quitar_relleno(s: str) -> str:
+    """Quita palabras de relleno (de, un, la, etc.) de un texto ya
+    normalizado. Solo se usa como ULTIMO recurso de busqueda — varios
+    nombres del menu usan 'de' a propósito (ej. 'Taco de Pastor'), así que
+    quitarlo de entrada rompería la precisión de los niveles anteriores.
+    Pero frases como 'agua DE litro' insertan un 'de' que el nombre real
+    del producto ('Agua 1 Lt') no tiene, y sin este nivel nunca matchean."""
+    return " ".join(p for p in s.split() if p not in _PALABRAS_RELLENO)
 
 
 def _singularizar(palabra: str) -> str:
@@ -360,7 +378,10 @@ def _buscar_coincidencias(texto: str, menu: list) -> list:
     Prioriza: 1) coincidencia exacta de nombre completo, 2) el texto contiene
     el nombre completo del producto (busqueda especifica), 3) el nombre
     singularizado del texto esta contenido en el nombre del producto
-    (busqueda generica, ej. 'volcanes' encuentra las 4 variantes de Volcan).
+    (busqueda generica, ej. 'volcanes' encuentra las 4 variantes de Volcan),
+    4) como ultimo recurso, la misma comparacion pero quitando palabras de
+    relleno (de, un, la...) de ambos lados — para casos como 'agua DE litro'
+    que de otro modo nunca matchearia con 'Agua 1 Lt'.
     Esto evita que un termino generico devuelva solo la primera coincidencia
     cuando en realidad hay varias variantes — en ese caso deben devolverse
     todas para que la herramienta pueda detectar la ambiguedad y preguntar."""
@@ -378,6 +399,16 @@ def _buscar_coincidencias(texto: str, menu: list) -> list:
     texto_en_nombre = [i for i in menu if t_sing in _normalizar_txt(i["nombre"])]
     if texto_en_nombre:
         return texto_en_nombre
+
+    sin_relleno = _quitar_relleno(t_sing)
+    if sin_relleno and sin_relleno != t_sing:
+        sin_relleno_match = [
+            i for i in menu
+            if sin_relleno in _quitar_relleno(_normalizar_txt(i["nombre"]))
+            or _quitar_relleno(_normalizar_txt(i["nombre"])) in sin_relleno
+        ]
+        if sin_relleno_match:
+            return sin_relleno_match
 
     return [i for i in menu if t in _normalizar_txt(i["nombre"])]
 
@@ -566,7 +597,6 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
         menu          = _menu_cache.get(negocio_id, [])
         email_notif   = negocio.get("email_notificaciones", "")
         tipo_servicio = negocio.get("tipo_servicio", "ambos")
-        costo_envio   = float(negocio.get("costo_envio") or 0)
         pedido_min    = float(negocio.get("pedido_minimo") or 0)
         tiempo_rec    = negocio.get("tiempo_recoger_min", 20)
         tiempo_env    = negocio.get("tiempo_envio_min", 40)
@@ -733,7 +763,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 nombre_cl    = sesion["nombre_cliente"]
                 direccion    = sesion["direccion_entrega"]
                 notas_raw    = sesion.get("notas_pedido", "")
-                costo_envio_real = sesion.get("costo_envio_calc", 0) or costo_envio
+                costo_envio_real = sesion.get("costo_envio_calc", 0)
                 total        = _calcular_total(carrito)
                 total_con_envio = total + (costo_envio_real if tipo_entrega == "envio" else 0)
 
@@ -869,7 +899,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 # El cliente dijo algo que no es SÍ ni NO (saludo, pregunta,
                 # etc.) — le recordamos que tiene un pedido pendiente en vez
                 # de caer al LLM que puede ignorar la fase y hacer cualquier cosa.
-                costo_envio_real = sesion.get("costo_envio_calc", 0) or costo_envio
+                costo_envio_real = sesion.get("costo_envio_calc", 0)
                 resumen = _formato_carrito(carrito, costo_envio_real if sesion.get("tipo_entrega") == "envio" else 0)
                 resp = (
                     f"Tienes un pedido pendiente de confirmar 👆\n\n"
@@ -999,7 +1029,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 # si no se hace esto, un [PAGO:Tarjeta] viejo termina
                 # mostrandose crudo, o anidado dentro de un nuevo [PAGO:..].
                 _, notas = _extraer_pago_de_notas(sesion.get("notas_pedido", ""))
-                costo_envio_real = sesion.get("costo_envio_calc", 0) or costo_envio
+                costo_envio_real = sesion.get("costo_envio_calc", 0)
                 total        = _calcular_total(carrito)
                 total_con_envio = total + costo_envio_real
                 resumen = _formato_carrito(carrito, costo_envio_real)
@@ -1057,7 +1087,6 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
             # de texto). Guardamos un texto legible para el resumen y correo.
             if coords_ubicacion:
                 direccion = "📍 Ubicación compartida por WhatsApp"
-                costo_calculado = costo_envio
                 aviso_envio = ""
 
                 if envio_dinamico and coords_negocio:
@@ -1085,11 +1114,32 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                         return
                     else:
                         # Fallo el calculo de distancia con la API (raro, pero
-                        # puede pasar) — seguimos con la tarifa fija como
-                        # respaldo en vez de trabar al cliente.
+                        # puede pasar). Ya NO hay tarifa fija de respaldo —
+                        # bloqueamos el pedido y pedimos que llamen directo,
+                        # para no arriesgarnos a cobrar de menos o de más.
                         print(f"   [{nombre_neg}] No se pudo calcular distancia desde ubicación: {resultado['razon']}")
-                        lat, lng = coords_ubicacion
-                        direccion = f"📍 Ubicación compartida\nhttps://maps.google.com/?q={lat},{lng}"
+                        resp = (
+                            "Por el momento no pude calcular automáticamente el costo de envío a tu ubicación. 😕\n"
+                            "¿Podrías llamarnos directo para confirmar tu pedido y el costo de envío?"
+                        )
+                        nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                        db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion", carrito=carrito)
+                        enviar_whatsapp(telefono, resp, token, phone_number_id)
+                        print(f"   [{nombre_neg}] Pedido bloqueado — fallo cálculo de envío, se pidió llamar directo.")
+                        return
+                else:
+                    # El negocio no tiene configurado el cálculo dinámico de
+                    # envío — sin tarifa fija de respaldo, no podemos
+                    # calcular el costo. Bloqueamos igual que arriba.
+                    resp = (
+                        "Por el momento no puedo calcular automáticamente el costo de envío. 😕\n"
+                        "¿Podrías llamarnos directo para confirmar tu pedido y el costo de envío?"
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion", carrito=carrito)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Pedido bloqueado — envío dinámico no configurado, se pidió llamar directo.")
+                    return
 
                 resp = f"¿A nombre de quién registramos el pedido?{aviso_envio}"
                 db.guardar_sesion(llave, historial, fase_pedido="nombre",
@@ -1104,7 +1154,6 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 return
 
             if len(direccion) >= 5:
-                costo_calculado = costo_envio  # fallback: tarifa fija configurada
                 aviso_envio = ""
 
                 if envio_dinamico and coords_negocio:
@@ -1139,6 +1188,19 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                             enviar_whatsapp(telefono, resp, token, phone_number_id)
                             print(f"   [{nombre_neg}] No se pudo geocodificar: '{direccion}' — {resultado['razon']}")
                             return
+                else:
+                    # El negocio no tiene configurado el cálculo dinámico de
+                    # envío — sin tarifa fija de respaldo, no podemos
+                    # calcular el costo. Bloqueamos y pedimos llamar directo.
+                    resp = (
+                        "Por el momento no puedo calcular automáticamente el costo de envío. 😕\n"
+                        "¿Podrías llamarnos directo para confirmar tu pedido y el costo de envío?"
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion", carrito=carrito)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Pedido bloqueado — envío dinámico no configurado, se pidió llamar directo.")
+                    return
 
                 resp = f"¿A nombre de quién registramos el pedido?{aviso_envio}"
                 db.guardar_sesion(llave, historial, fase_pedido="nombre",
@@ -1347,7 +1409,17 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
         @tool
         def ver_carrito() -> str:
             """Muestra el resumen actual del carrito."""
-            return _formato_carrito(carrito_estado, costo_envio)
+            # IMPORTANTE: nunca mostrar costo de envío aquí si todavía no
+            # sabemos que el cliente eligió envío como tipo de entrega Y ya
+            # se calculó la tarifa dinámica por distancia — antes esto
+            # mostraba "Envío — $50" de forma fantasma en cualquier momento
+            # de la conversación, antes de que el cliente hubiera elegido
+            # recoger o envío siquiera.
+            costo_a_mostrar = (
+                sesion.get("costo_envio_calc", 0)
+                if sesion.get("tipo_entrega") == "envio" else 0
+            )
+            return _formato_carrito(carrito_estado, costo_a_mostrar)
 
         @tool
         def guardar_nota(nota: str) -> str:
@@ -1390,7 +1462,7 @@ Tu trabajo es tomar el pedido del cliente de forma amigable y precisa.
 
 Horarios: {horarios or 'Consultar con el negocio.'}
 Tipos de servicio disponibles: {tipo_servicio}
-Costo de envío: {'$' + str(costo_envio) if costo_envio > 0 else 'sin costo'}
+Costo de envío: se calcula automáticamente según la distancia, una vez que el cliente comparta su dirección o ubicación — tú nunca des un número de envío de memoria.
 Pedido mínimo: {'$' + str(pedido_min) if pedido_min > 0 else 'sin mínimo'}
 Métodos de pago aceptados: {metodos_pago}
 
@@ -1408,7 +1480,8 @@ REGLAS IMPORTANTES:
 - Algunos tacos tienen promociones por cantidad (ej. Pastor es 2x1, Bistec es 3x$60, etc. — se ven marcadas en el menú). El precio final con la promo ya aplicada se calcula automáticamente y aparece en el carrito que te devuelve la herramienta — tú NUNCA calcules el precio de tacos a mano, solo usa el texto que te da la herramienta.
 - Cuando el cliente pregunte qué lleva o qué ingredientes tiene un producto, usa SIEMPRE la herramienta info_producto. NUNCA inventes ingredientes ni agregues cosas que no estén en la descripción del menú.
 - Cuando el cliente pida algo especial (sin cilantro, sin cebolla, extra queso, bien cocido, etc.), usa guardar_nota para registrarlo. NUNCA ignores estas instrucciones.
-- NO llames agregar_al_carrito y cerrar_pedido en el mismo mensaje. Si el cliente dice 'es todo' o 'nada más', llama SOLO cerrar_pedido.
+- NO llames agregar_al_carrito y cerrar_pedido en el mismo mensaje, NUNCA. Si el cliente responde "sí" confirmando que agregues algo (ej. tú preguntaste "¿agrego las aguas?" y dice "sí"), eso SOLO significa agregar ese producto — NO es señal de que terminó su pedido. Después de agregar, SIEMPRE pregunta "¿algo más, o ya sería todo?" y espera la respuesta del cliente antes de considerar cerrar_pedido.
+- Solo llama cerrar_pedido cuando el cliente lo diga EXPLÍCITAMENTE con frases como "es todo", "ya es todo", "nada más", "eso sería todo", "con eso es todo" — un simple "sí" respondiendo a otra pregunta tuya NUNCA cuenta como esto.
 - REGLA CRÍTICA: si el cliente responde solo "sí", "ok", "va", "dale", "claro" u otra confirmación corta SIN mencionar ningún producto nuevo, NUNCA llames agregar_al_carrito repitiendo el último producto que pidió — eso duplicaría su pedido por error y es un fallo grave. Una confirmación corta sin producto nuevo significa que está de acuerdo con algo que dijiste (el carrito, el precio, etc.), no que quiera repetir la compra. Si no tienes claro a qué se refiere, pregúntale qué más desea agregar.
 - Cuando agregues uno o varios productos, el resultado de agregar_al_carrito ya trae el carrito completo con precios y subtotal formateado. Usa ESE texto en tu respuesta tal cual (puedes agregar una frase corta antes como "¡Listo! Así va tu pedido:"), NUNCA reescribas la lista de productos tú mismo ni inventes cómo agrupar las cantidades — eso causa errores graves como mostrar productos duplicados o cantidades incorrectas.
 - Si el cliente pide algo que no está en el menú, indícalo claramente y ofrece alternativas.
@@ -1481,6 +1554,44 @@ REGLAS IMPORTANTES:
                     return True
                 return False
 
+            # Nombres de productos bloqueados por re-agregado en este turno
+            # (se usa abajo para tambien filtrar notas-fantasma sobre ellos).
+            nombres_bloqueados = set()
+
+            _PALABRAS_INSTRUCCION = {
+                "sin", "extra", "con", "bien", "poco", "mucho", "no",
+                "agregar", "picante", "dorado", "doradito", "cocido",
+                "crudo", "aparte", "doble", "cebolla", "cilantro",
+                "salsa", "queso", "cocida", "termino",
+            }
+
+            def _nota_es_solo_restatement(texto_nota: str, nombre_producto: str) -> bool:
+                """Detecta si una nota es solo 'N <producto>' repitiendo lo
+                que ya esta en el carrito (sin instruccion real como 'sin
+                cebolla' o 'extra queso') — en ese caso es ruido, no una
+                nota util, y se debe descartar para no ensuciar el pedido
+                con notas vacias de contenido que confunden a la cocina."""
+                t = _normalizar_txt(texto_nota)
+                if any(p in t.split() for p in _PALABRAS_INSTRUCCION):
+                    return False  # tiene contenido real, SI es una nota valida
+                # Quitamos digitos y el nombre del producto; si no queda
+                # nada sustancial, es pura restatement.
+                t_sin_numeros = re.sub(r'\d+', '', t).strip()
+                t_sin_producto = _quitar_relleno(t_sin_numeros)
+                for palabra in _normalizar_txt(nombre_producto).split():
+                    t_sin_producto = t_sin_producto.replace(palabra, "").strip()
+                return len(t_sin_producto.strip()) <= 2  # casi nada sobra
+
+            # Primera pasada: identificar TODOS los productos bloqueados por
+            # re-agregado en este turno, sin importar el orden en que el
+            # modelo haya llamado las herramientas (agregar_al_carrito podria
+            # venir antes o despues de guardar_nota en la lista).
+            for tc in resp_llm.tool_calls:
+                if tc["name"] == "agregar_al_carrito" and _es_reagregado(tc["args"]):
+                    item_bloqueado = _buscar_en_menu(tc["args"].get("nombre_producto", ""), menu)
+                    if item_bloqueado:
+                        nombres_bloqueados.add(item_bloqueado["nombre"])
+
             for tc in resp_llm.tool_calls:
                 fn_name = tc["name"]
                 fn_args = tc["args"]
@@ -1493,6 +1604,15 @@ REGLAS IMPORTANTES:
                         "no pidió repetir su pedido. Pregúntale si quiere algo más."
                     )
                     continue
+
+                if fn_name == "guardar_nota" and nombres_bloqueados:
+                    nota_txt = fn_args.get("nota", "")
+                    if any(_nota_es_solo_restatement(nota_txt, nb) for nb in nombres_bloqueados):
+                        print(f"   [{nombre_neg}] guardar_nota saltado (solo repetía cantidad/producto ya en el carrito, sin instrucción real).")
+                        tool_results.append(
+                            "No guardes esa nota — solo repetía lo que ya está en el carrito, no era una instrucción especial."
+                        )
+                        continue
 
                 fn_map = {
                     "ver_menu":           ver_menu,
