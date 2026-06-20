@@ -325,7 +325,12 @@ def _formato_menu(items: list) -> str:
 
 def _normalizar_txt(s: str) -> str:
     import unicodedata
-    return unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode()
+    s = unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode()
+    # Tolerar variantes de formato para litros: "1L", "1 Lt", "1 litro",
+    # "1lt" todas se normalizan igual, para que coincidan sin importar como
+    # el cliente (o el LLM al copiarlo) lo haya escrito.
+    s = re.sub(r'(\d)\s*l(?:t|ts|itro|itros)?\b', r'\1lt', s)
+    return s
 
 
 def _singularizar(palabra: str) -> str:
@@ -636,9 +641,18 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
         # (Esta es una red de seguridad adicional para el caso especifico
         # de carrito sin fase; la caducidad de arriba cubre el caso general
         # de cualquier fase atorada, con o sin saludo.)
+        # BUG CRITICO CORREGIDO: antes se usaba "in" (substring), lo que
+        # causaba que palabras como "chingaos" (contiene "hi") disparuran
+        # un falso positivo y BORRARAN EL CARRITO DEL CLIENTE sin que lo
+        # pidiera. Ahora usamos limite de palabra completa (\b) con regex,
+        # y ademas solo se activa si el mensaje es ESENCIALMENTE un saludo
+        # (no si la palabra aparece en medio de una oracion sobre otra cosa).
         _SALUDOS = {"hola","buenas","buen dia","buenos dias","buenas tardes",
                     "buenas noches","hey","hi","hello","ola","saludos"}
-        if carrito and not fase and any(s in texto_low for s in _SALUDOS):
+        _es_saludo_palabra_completa = any(
+            re.search(rf"\b{re.escape(s)}\b", texto_low) for s in _SALUDOS
+        )
+        if carrito and not fase and _es_saludo_palabra_completa and len(texto.split()) <= 4:
             db.limpiar_sesion(llave)
             carrito = []
             sesion  = db.cargar_sesion(llave)
@@ -1312,12 +1326,21 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
             return f"{carrito_txt}{aviso_min}\n\n¿Algo más, o ya sería todo? 😊"
 
         @tool
-        def quitar_del_carrito(nombre_producto: str) -> str:
-            """Quita un producto del carrito del cliente."""
+        def quitar_del_carrito(nombre_producto: str, cantidad: int = 0) -> str:
+            """Quita un producto del carrito del cliente.
+            cantidad: cuantas piezas quitar. Si el cliente dice 'quítame uno'
+            o 'quita 2', pasa ese numero — se RESTA esa cantidad de la linea,
+            sin eliminar el producto completo a menos que la cantidad llegue
+            a 0. Si el cliente NO especifica cuántos (ej. 'quita el alambre',
+            'ya no quiero las tortas'), deja cantidad=0 (default) y se
+            elimina la línea completa, sin importar cuántas piezas había."""
             item = _buscar_en_menu(nombre_producto, menu)
             nombre_buscado = item["nombre"] if item else nombre_producto
             for i, c in enumerate(carrito_estado):
                 if c["nombre"].lower() == nombre_buscado.lower():
+                    if cantidad > 0 and c["cantidad"] > cantidad:
+                        c["cantidad"] -= cantidad
+                        return f"Quité {cantidad}x {nombre_buscado}. Quedan {c['cantidad']}x en tu carrito."
                     carrito_estado.pop(i)
                     return f"Eliminado: {nombre_buscado} del carrito."
             return f"No encontré '{nombre_producto}' en tu carrito."
