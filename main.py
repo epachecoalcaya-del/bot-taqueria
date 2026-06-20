@@ -9,6 +9,7 @@ import html
 import smtplib
 import requests
 import datetime
+import time
 from email.mime.text import MIMEText
 from typing import Optional
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Form
@@ -56,7 +57,12 @@ def health():
 
 # ── HELPERS DE WHATSAPP ──────────────────────────────────────────────────────
 
-def enviar_whatsapp(telefono: str, mensaje: str, token: str, phone_id: str) -> bool:
+def enviar_whatsapp(telefono: str, mensaje: str, token: str, phone_id: str,
+                     intentos: int = 3) -> bool:
+    """Envia un mensaje de WhatsApp. Reintenta hasta `intentos` veces con
+    backoff simple si falla por un problema momentaneo de red o de la API
+    (timeouts, 5xx). Errores claramente no-recuperables (401, 400 por
+    numero invalido, etc.) no se reintentan, para no perder tiempo."""
     url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
     payload = {
         "messaging_product": "whatsapp",
@@ -64,10 +70,25 @@ def enviar_whatsapp(telefono: str, mensaje: str, token: str, phone_id: str) -> b
         "type": "text",
         "text": {"body": mensaje},
     }
-    r = requests.post(url, headers={"Authorization": f"Bearer {token}"}, json=payload, timeout=10)
-    if not r.ok:
-        print(f"!!! Error enviando WhatsApp: {r.status_code} {r.text[:200]}")
-    return r.ok
+    ultimo_error = ""
+    for intento in range(1, intentos + 1):
+        try:
+            r = requests.post(url, headers={"Authorization": f"Bearer {token}"},
+                              json=payload, timeout=10)
+            if r.ok:
+                return True
+            ultimo_error = f"{r.status_code} {r.text[:200]}"
+            # 401 (token invalido/expirado) o 400 (numero invalido) no se
+            # arreglan reintentando — fallamos rapido.
+            if r.status_code in (400, 401):
+                break
+        except Exception as e:
+            ultimo_error = str(e)
+        if intento < intentos:
+            time.sleep(1.5 * intento)  # backoff: 1.5s, 3s...
+
+    print(f"!!! FALLO DEFINITIVO enviando WhatsApp a {telefono} tras {intento} intento(s): {ultimo_error}")
+    return False
 
 
 # ── HELPERS DE CORREO ────────────────────────────────────────────────────────
@@ -544,6 +565,31 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
 
         print(f"-> [Procesando] {telefono} | fase={fase or 'inicio'} | msg='{texto[:60]}'")
 
+        # ── CANCELAR PEDIDO ───────────────────────────────────────────────
+        # El cliente puede cancelar su pedido mas reciente en cualquier
+        # momento, SIEMPRE que todavia no haya pasado a 'en_proceso' (la
+        # cocina ya empezo a prepararlo). Esto funciona desde cualquier
+        # fase y aunque el negocio este cerrado, porque cancelar es una
+        # accion que no depende del horario.
+        _PALABRAS_CANCELAR = {"cancelar", "cancela", "cancelar pedido", "anular", "anula"}
+        if texto_low.strip(".,!¡¿? ") in _PALABRAS_CANCELAR or texto_low.startswith("cancelar"):
+            pedido_cancelable = db.buscar_pedido_cancelable(negocio_id, telefono)
+            if pedido_cancelable:
+                db.actualizar_estado_pedido(pedido_cancelable["id"], "cancelado")
+                resp = (
+                    f"❌ Tu pedido #{pedido_cancelable['id']} fue cancelado. "
+                    f"Si cambias de opinión, aquí estamos para ayudarte. 🌮"
+                )
+                db.limpiar_sesion(llave)
+                print(f"   [{nombre_neg}] Pedido #{pedido_cancelable['id']} cancelado por el cliente.")
+            else:
+                resp = (
+                    "No encontré ningún pedido tuyo que se pueda cancelar en este momento "
+                    "(puede que ya esté en preparación — en ese caso contáctanos directo)."
+                )
+            enviar_whatsapp(telefono, resp, token, phone_number_id)
+            return
+
         # Limpieza de carrito huerfano: si hay productos en el carrito pero
         # no hay una fase activa (el pedido quedo a medias por algun error),
         # limpiamos al detectar un saludo nuevo para empezar desde cero.
@@ -823,6 +869,22 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
                 print(f"   [{nombre_neg}] Nombre capturado: {nombre_cl}, mostrando resumen.")
                 return
+            else:
+                # El cliente escribio algo que no parece un nombre — puede
+                # ser una pregunta suelta ("¿hasta que hora abren?") en
+                # medio del flujo. No lo mandamos al LLM libre (eso podria
+                # sacarlo de la fase sin querer); solo reconocemos el
+                # mensaje y volvemos a pedir el dato pendiente, para no
+                # perder el progreso del pedido.
+                resp = (
+                    "Veo que me escribiste algo más, ¡con gusto te ayudo después! 😊\n"
+                    "Por ahora, ¿me confirmas a nombre de quién registramos tu pedido?"
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="nombre", carrito=carrito)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Texto no parece nombre ('{texto[:30]}'), reiterando pregunta.")
+                return
 
         # FASE: pago — esperando metodo de pago (solo para pedidos de envio)
         if fase == "pago":
@@ -997,6 +1059,19 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                                   costo_envio_calc=costo_calculado)
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
                 print(f"   [{nombre_neg}] Dirección capturada: {direccion[:40]} — envío: ${costo_calculado}")
+                return
+            else:
+                # El texto es muy corto para ser una direccion real (ej.
+                # "ok", o una pregunta suelta). Reiteramos la pregunta sin
+                # perder la fase, en vez de dejar que caiga al LLM libre.
+                resp = (
+                    "No alcancé a identificar bien tu dirección. ¿Me la compartes de nuevo "
+                    "(calle, número, colonia), o mándame tu ubicación con el 📎 de WhatsApp?"
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion", carrito=carrito)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Texto muy corto para dirección ('{texto[:30]}'), reiterando pregunta.")
                 return
 
         # FASE: tipo — esperando si es para recoger o envío
