@@ -566,6 +566,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
         tiempo_rec    = negocio.get("tiempo_recoger_min", 20)
         tiempo_env    = negocio.get("tiempo_envio_min", 40)
         metodos_pago  = negocio.get("metodos_pago", "Efectivo")
+        bienvenida    = negocio.get("mensaje_bienvenida", "¡Hola! ¿Qué te gustaría ordenar?")
         envio_dinamico = bool(negocio.get("costo_envio_dinamico"))
         modo_lluvia    = bool(negocio.get("modo_lluvia"))
         coords_negocio = None
@@ -683,6 +684,30 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
             )
             enviar_whatsapp(telefono, msg_cerrado, token, phone_number_id)
             print(f"   [{nombre_neg}] Fuera de horario — mensaje de cerrado enviado.")
+            return
+
+        # ── SALUDO INICIAL DETERMINISTICO ───────────────────────────────────
+        # Si el mensaje es UNICAMENTE un saludo (sin nada mas, ej. "Hola",
+        # "Buenas tardes") y no hay carrito/fase activa, respondemos con el
+        # mensaje de bienvenida EXACTO configurado por el dueño, sin pasar
+        # por el LLM. Esto evita que el modelo improvise un saludo distinto
+        # o, peor, prometa "aqui tienes el menu" sin realmente mandarlo —
+        # un bug real visto en produccion. Si el saludo viene acompañado de
+        # mas texto (ej. "Hola, quiero 2 tacos"), dejamos que el LLM lo
+        # maneje normal, porque ahi si hay intencion de pedido real.
+        _es_solo_saludo = (
+            not carrito and not fase
+            and texto_low.strip(".,!¡¿? ") in _SALUDOS
+        )
+        if _es_solo_saludo:
+            aviso_min_saludo = ""
+            if pedido_min > 0 and tipo_servicio in ("envio", "ambos"):
+                aviso_min_saludo = f" Recuerda que el pedido mínimo para envío a domicilio es de {_fmt_precio(pedido_min)}."
+            resp = f"{bienvenida}{aviso_min_saludo}"
+            nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+            db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:])
+            enviar_whatsapp(telefono, resp, token, phone_number_id)
+            print(f"   [{nombre_neg}] Saludo inicial respondido de forma determinística.")
             return
 
         # ── FLUJO DETERMINISTICO POR FASE ───────────────────────────────────
@@ -1337,7 +1362,6 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
 
         horarios = negocio.get("horarios_texto", "")
         base_conoc = negocio.get("base_conocimiento", "")
-        bienvenida = negocio.get("mensaje_bienvenida", "¡Hola! ¿Qué te gustaría ordenar?")
 
         sistema = f"""Eres el asistente de pedidos de {nombre_neg}, una taquería que atiende por WhatsApp.
 Tu trabajo es tomar el pedido del cliente de forma amigable y precisa.
