@@ -864,12 +864,25 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         _es_saludo_palabra_completa = any(
             re.search(rf"\b{re.escape(s)}\b", texto_low) for s in _SALUDOS
         )
-        if carrito and not fase and _es_saludo_palabra_completa and len(texto.split()) <= 4:
+        _es_saludo_corto = _es_saludo_palabra_completa and len(texto.split()) <= 4
+        # Caso 1: carrito huerfano (productos sin fase activa).
+        # Caso 2: sesion atorada en CUALQUIER fase del flujo de cierre
+        # (tipo/nombre/direccion/pago/personalizacion). Bug real visto en
+        # pruebas: un cliente que dejo un pedido a medias en fase 'tipo' y
+        # volvio mas tarde (dentro de las 2h, antes de que caduque la
+        # sesion) diciendo "Hola" se quedaba atorado — el bot respondia
+        # "texto no reconocido en fase tipo" a TODO (incluido el saludo y
+        # cualquier producto nuevo) hasta que por casualidad decia una
+        # palabra valida de esa fase. Un saludo corto es señal inequivoca
+        # de que quiere empezar de nuevo, asi que reiniciamos la sesion.
+        _fase_en_flujo = fase in ("tipo", "nombre", "direccion", "pago") or fase.startswith("personalizacion:")
+        if _es_saludo_corto and ((carrito and not fase) or _fase_en_flujo):
             db.limpiar_sesion(llave)
             carrito = []
+            fase    = ""
             sesion  = db.cargar_sesion(llave)
             historial = sesion["historial"]
-            print(f"   [{nombre_neg}] Carrito huerfano limpiado al detectar saludo nuevo.")
+            print(f"   [{nombre_neg}] Sesión reiniciada al detectar saludo nuevo (carrito/fase previa limpiada).")
 
         # ── VALIDACION DE HORARIO ────────────────────────────────────────────
         # Si el negocio esta cerrado (cerrado_hoy o fuera de horario), avisamos
