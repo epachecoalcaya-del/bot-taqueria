@@ -1882,10 +1882,19 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             - Esta herramienta SOLO guarda la nota. NO vuelvas a llamar
               agregar_al_carrito — el producto YA está en el carrito."""
             notas_actuales = sesion.get("notas_pedido", "")
-            nueva_nota = f"{notas_actuales} | {nota}".strip(" |") if notas_actuales else nota
+            # Evitar duplicar una nota identica: el LLM a veces llama
+            # guardar_nota dos veces con la misma frase (en turnos
+            # distintos), lo que producia notas corruptas con la misma
+            # instruccion repetida — bug real visto en produccion.
+            nota_limpia = nota.strip()
+            notas_previas_lista = [n.strip() for n in notas_actuales.split("|")] if notas_actuales else []
+            if nota_limpia and nota_limpia.lower() in [n.lower() for n in notas_previas_lista]:
+                # Ya existe identica, no la agregamos de nuevo.
+                return f"Esa nota ya estaba guardada ✅. El producto ya está en el carrito, no lo agregues de nuevo."
+            nueva_nota = f"{notas_actuales} | {nota_limpia}".strip(" |") if notas_actuales else nota_limpia
             db.guardar_sesion(llave, historial, notas_pedido=nueva_nota)
             sesion["notas_pedido"] = nueva_nota
-            return f"Nota guardada: '{nota}' ✅. El producto ya está en el carrito, no lo agregues de nuevo."
+            return f"Nota guardada: '{nota_limpia}' ✅. El producto ya está en el carrito, no lo agregues de nuevo."
 
         @tool
         def cerrar_pedido() -> str:
@@ -1921,6 +1930,11 @@ EJEMPLO DE COMPORTAMIENTO CORRECTO:
 Cliente: "Quiero 2 que me ves"
 Tú: [llamas agregar_al_carrito con nombre_producto="que me ves", cantidad=2 — INMEDIATAMENTE, sin preguntar nada antes]
 (La herramienta te responde con el carrito. Si tiene el producto, perfecto. Si hay varias opciones, recién entonces preguntas cuál.)
+
+EJEMPLO DE PEDIDO CON VARIOS PRODUCTOS (MUY IMPORTANTE):
+Cliente: "3 tacos de pastor y una hamburguesa de bistec"
+Tú: [llamas agregar_al_carrito DOS VECES en el mismo turno: una con nombre_producto="taco de pastor", cantidad=3, y OTRA con nombre_producto="hamburguesa de bistec", cantidad=1]
+NUNCA muestres en tu respuesta un producto que no agregaste con la herramienta — si el cliente pidió 2 productos, DEBES llamar agregar_al_carrito 2 veces (una por cada producto). Mostrar un producto en el texto sin haberlo agregado con la herramienta es un error grave: el cliente cree que está en su pedido pero no se cobra ni se prepara.
 
 REGLAS IMPORTANTES:
 - Usa SIEMPRE la herramienta agregar_al_carrito para añadir productos. NUNCA inventes precios.
