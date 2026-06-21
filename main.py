@@ -1720,6 +1720,16 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 cantidad = int(match_cantidad.group(1))
                 nombre_producto = match_cantidad.group(2)
 
+            # Cantidad 0 o negativa: el cliente dijo algo como "0 tacos" o
+            # "quita" mal interpretado — no agregamos nada y pedimos que
+            # aclare, en vez de convertir el 0 a 1 silenciosamente (bug
+            # real visto en pruebas: "0 tacos de pastor" agregaba 1 taco).
+            if cantidad <= 0:
+                return (
+                    f"¿Cuántos '{nombre_producto}' te gustaría? Dime una cantidad "
+                    "y con gusto lo agrego a tu pedido. 😊"
+                )
+
             coincidencias = _buscar_coincidencias(nombre_producto, menu)
 
             if not coincidencias:
@@ -1948,6 +1958,11 @@ EJEMPLO DE PEDIDO CON VARIOS PRODUCTOS (MUY IMPORTANTE):
 Cliente: "3 tacos de pastor y una hamburguesa de bistec"
 Tú: [llamas agregar_al_carrito DOS VECES en el mismo turno: una con nombre_producto="taco de pastor", cantidad=3, y OTRA con nombre_producto="hamburguesa de bistec", cantidad=1]
 NUNCA muestres en tu respuesta un producto que no agregaste con la herramienta — si el cliente pidió 2 productos, DEBES llamar agregar_al_carrito 2 veces (una por cada producto). Mostrar un producto en el texto sin haberlo agregado con la herramienta es un error grave: el cliente cree que está en su pedido pero no se cobra ni se prepara.
+
+EJEMPLO CRÍTICO — DIVIDIR UNA CANTIDAD YA PEDIDA EN PREFERENCIAS (NO es agregar más):
+Cliente: "4 tacos de pastor" → [agregas 4 tacos de pastor]
+Cliente: "2 sin cebolla y 2 con todo" → esto se refiere a CÓMO preparar los 4 tacos QUE YA ESTÁN en el carrito, NO es un pedido de 2+2 tacos nuevos. NO llames agregar_al_carrito. Usa guardar_nota con algo como "2 tacos sin cebolla, 2 con todo" y deja la cantidad del carrito en 4. Agregar 2 tacos más aquí (dejando 6) es un error grave que le cobra de más al cliente.
+Regla general: cuando el cliente describe variaciones o preferencias que SUMAN la cantidad que YA pidió (ej. ya pidió 4 y ahora dice "2 de X y 2 de Y"), es personalización, no producto nuevo.
 
 REGLAS IMPORTANTES:
 - Usa SIEMPRE la herramienta agregar_al_carrito para añadir productos. NUNCA inventes precios.
