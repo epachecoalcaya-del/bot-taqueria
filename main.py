@@ -1474,6 +1474,31 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 )
 
             item = coincidencias[0]
+
+            # RED DE SEGURIDAD: a veces el LLM, en vez de pasar la frase
+            # ambigua del cliente tal cual (ej. "agua de litro"), la
+            # "resuelve" el mismo inventando un detalle especifico que el
+            # cliente nunca dijo (ej. pasa nombre_producto="Agua
+            # Fresa-Limón 1 Lt" cuando el cliente solo dijo "agua de
+            # litro") — esto hace que la busqueda de mas arriba encuentre
+            # una sola coincidencia "limpia" y nunca dispare la pregunta de
+            # desambiguacion, porque la ambiguedad ya fue resuelta (mal)
+            # antes de llegar aqui. Para detectarlo: reconstruimos una
+            # version del argumento usando SOLO las palabras que el
+            # cliente realmente escribio en este turno: si esa version
+            # "fiel" encuentra varias coincidencias (en vez de una sola),
+            # es señal de que el LLM invento la palabra que desambiguo.
+            texto_normalizado = _normalizar_txt(texto_low)
+            palabras_arg = [p for p in _normalizar_txt(nombre_producto).split() if len(p) > 1]
+            palabras_fieles = [p for p in palabras_arg if p in texto_normalizado]
+            if len(palabras_fieles) < len(palabras_arg) and palabras_fieles:
+                coincidencias_fieles = _buscar_coincidencias(" ".join(palabras_fieles), menu)
+                if len(coincidencias_fieles) > 1:
+                    opciones = "\n".join(
+                        f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in coincidencias_fieles
+                    )
+                    return f"Tenemos varias opciones, ¿cuál te gustaría? 😊\n{opciones}"
+
             ya_existia = False
             for c in carrito_estado:
                 if c["nombre"] == item["nombre"]:
@@ -1634,6 +1659,7 @@ REGLAS IMPORTANTES:
 - NUNCA preguntes tú mismo la dirección, ubicación, o tipo de entrega (recoger/envío) de forma libre — eso SIEMPRE debe pasar por cerrar_pedido. Si el cliente menciona "a domicilio" o "envío" de pasada mientras sigue agregando productos, no le preguntes la dirección todavía — sigue tomando su pedido normal hasta que diga explícitamente que ya terminó, y AHÍ llama cerrar_pedido, que se encargará de pedir la dirección correctamente.
 - Las salsas, tipo de cocción, o personalizaciones similares NO son productos independientes del menú — son atributos de un platillo. NUNCA llames agregar_al_carrito para "salsa roja", "salsa verde", etc. Si el cliente elige una salsa para algo que ya está en su carrito, usa guardar_nota para anotarlo (ej. "Que Me Ves con salsa roja"), nunca intentes agregarla como producto nuevo.
 - Si el cliente pide un ingrediente EXTRA con costo adicional (ej. "con extra queso", "agrégale aguacate de más", "doble tocino"), usa la herramienta agregar_extra — NUNCA agregar_al_carrito ni guardar_nota para esto, porque agregar_extra es la única que suma el costo correcto ($15) al total. Si el cliente solo dice cómo quiere el platillo SIN que sea claramente un extra con costo (ej. "sin cebolla", "bien dorado"), eso sigue siendo guardar_nota, no agregar_extra.
+- NUNCA inventes ni elijas tú una variante específica (ej. sabor, tamaño) que el cliente no haya mencionado. Si el cliente dice "una agua de litro" sin decir el sabor, pasa nombre_producto="agua de litro" tal cual a agregar_al_carrito — NO adivines ni elijas "Agua Jamaica" o cualquier otro sabor por tu cuenta. La herramienta se encarga de preguntar si hay varias opciones; tu trabajo es pasar las palabras del cliente sin agregarles nada que él no dijo.
 - REGLA CRÍTICA: si el cliente responde solo "sí", "ok", "va", "dale", "claro" u otra confirmación corta SIN mencionar ningún producto nuevo, NUNCA llames agregar_al_carrito repitiendo el último producto que pidió — eso duplicaría su pedido por error y es un fallo grave. Una confirmación corta sin producto nuevo significa que está de acuerdo con algo que dijiste (el carrito, el precio, etc.), no que quiera repetir la compra. Si no tienes claro a qué se refiere, pregúntale qué más desea agregar.
 - Cuando agregues uno o varios productos, el resultado de agregar_al_carrito ya trae el carrito completo con precios y subtotal formateado. Usa ESE texto en tu respuesta tal cual (puedes agregar una frase corta antes como "¡Listo! Así va tu pedido:"), NUNCA reescribas la lista de productos tú mismo ni inventes cómo agrupar las cantidades — eso causa errores graves como mostrar productos duplicados o cantidades incorrectas.
 - Si el cliente pide algo que no está en el menú, indícalo claramente y ofrece alternativas.
@@ -1825,6 +1851,30 @@ REGLAS IMPORTANTES:
                 texto_respuesta = resp_2.content.strip()
         else:
             texto_respuesta = resp_llm.content.strip()
+
+        # ── RED DE SEGURIDAD: cierre de pedido improvisado sin la tool ──────
+        # A veces el LLM, en vez de llamar cerrar_pedido, improvisa
+        # directamente una pregunta de "¿recoger o envío?" o "¿cuál es tu
+        # dirección?" en texto libre — un bug real visto en producción que
+        # deja la sesión atorada en fase vacía, donde ningún manejador
+        # deterministico la reconoce. Si detectamos este patrón y el
+        # carrito tiene productos, forzamos el flujo de cierre real en vez
+        # de mandar la pregunta improvisada del LLM tal cual.
+        if not iniciar_cierre and carrito_estado and not fase:
+            _PATRONES_CIERRE_IMPROVISADO = [
+                "recoger o envío", "recoger o envio", "envío o recoger", "envio o recoger",
+                "recoger en el local o envío", "recoger en el local o envio",
+                "para recoger o para envío", "para recoger o para envio",
+                "recoger o a domicilio", "recoger o a domicilio",
+            ]
+            if any(p in texto_respuesta.lower() for p in _PATRONES_CIERRE_IMPROVISADO):
+                print(f"   [{nombre_neg}] LLM improvisó pregunta de cierre sin llamar cerrar_pedido — forzando flujo determinístico (red de seguridad).")
+                iniciar_cierre = True
+                # Igual que el camino normal (cuando cerrar_pedido SI se
+                # llama), no guardamos el texto improvisado en el
+                # historial — el mensaje real que vera el cliente lo arma
+                # el bloque de cierre determinístico de abajo, no este texto.
+                texto_respuesta = ""
 
         # Guardar carrito actualizado (puede haber cambiado por las tools)
         nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=texto_respuesta or "")]
