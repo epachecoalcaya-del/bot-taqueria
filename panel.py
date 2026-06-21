@@ -419,26 +419,48 @@ async def panel_menu_get(phone_id: str, pwd: str = "", msg: str = ""):
     from main import _menu_cache
     items = _menu_cache.get(negocio["id"], [])
     def _fila_item(i, pid, p):
+        disponible_checked = "checked" if i.get("disponible", True) else ""
+        form_id = f"editar_{i['id']}"
+        # IMPORTANTE: un <form> NO puede ser hijo directo de <tr> abarcando
+        # varios <td> (HTML invalido — el navegador puede "expulsarlo" fuera
+        # de la tabla al parsear, rompiendo el layout). En su lugar, el
+        # <form> vive vacio dentro de un <td> y cada <input> de la fila se
+        # asocia a el mediante el atributo form="id" (soportado en todos
+        # los navegadores modernos) — el mismo problema que ya se resolvio
+        # en la tabla de Pedidos, pero ahi con un solo <select> por fila;
+        # aqui necesitamos varios campos por fila, por eso esta tecnica.
         return (
             "<tr>"
-            "<td>{}</td><td>{}</td><td>{}</td><td>${:.2f}</td>"
-            "<td><form method='post' action='/admin/{}/menu/eliminar?pwd={}' style='display:inline'>"
-            "<input type='hidden' name='item_id' value='{}'>"
-            "<button class='btn btn-danger' type='submit'>Eliminar</button>"
+            "<td><form id='{fid}' method='post' action='/admin/{pid}/menu/editar?pwd={p}'></form>"
+            "<input form='{fid}' type='hidden' name='item_id' value='{id}'>"
+            "<input form='{fid}' type='text' name='nombre' value='{nombre}' required style='width:100%'></td>"
+            "<td><input form='{fid}' type='text' name='descripcion' value='{desc}' style='width:100%'></td>"
+            "<td><input form='{fid}' type='text' name='categoria' value='{cat}' style='width:120px'></td>"
+            "<td><input form='{fid}' type='number' name='precio' value='{precio:.2f}' step='0.50' min='0' style='width:90px'></td>"
+            "<td style='text-align:center'><input form='{fid}' type='checkbox' name='disponible' {disp} title='Disponible'></td>"
+            "<td style='white-space:nowrap'>"
+            "<button form='{fid}' class='btn btn-primary' type='submit' style='font-size:.8rem;padding:6px 10px'>Guardar</button>"
+            "</td>"
+            "<td><form method='post' action='/admin/{pid}/menu/eliminar?pwd={p}' style='display:inline'>"
+            "<input type='hidden' name='item_id' value='{id}'>"
+            "<button class='btn btn-danger' type='submit' style='font-size:.8rem;padding:6px 10px' "
+            "onclick=\"return confirm('¿Eliminar {nombre_js}?')\">Eliminar</button>"
             "</form></td></tr>"
         ).format(
-            html.escape(i["nombre"]),
-            html.escape(i.get("descripcion", "")),
-            html.escape(i.get("categoria", "General")),
-            float(i["precio"]),
-            pid, p,
-            i["id"],
+            fid=form_id, pid=pid, p=p, id=i["id"],
+            nombre=html.escape(i["nombre"]),
+            nombre_js=html.escape(i["nombre"]).replace("'", ""),
+            desc=html.escape(i.get("descripcion", "")),
+            cat=html.escape(i.get("categoria", "General")),
+            precio=float(i["precio"]),
+            disp=disponible_checked,
         )
 
     filas = "".join(_fila_item(i, phone_id, pwd) for i in items) or \
-            "<tr><td colspan='5' style='color:#94a3b8;text-align:center;padding:20px'>Sin productos aún</td></tr>"
+            "<tr><td colspan='7' style='color:#94a3b8;text-align:center;padding:20px'>Sin productos aún</td></tr>"
 
     aviso = f"<div class='aviso'>✅ Producto agregado.</div>" if msg == "ok" else ""
+    aviso_editado = f"<div class='aviso'>✅ Producto actualizado.</div>" if msg == "editado" else ""
 
     return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
     <meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -451,13 +473,16 @@ async def panel_menu_get(phone_id: str, pwd: str = "", msg: str = ""):
       <a href='/admin/{phone_id}/menu?pwd={pwd}' class='active'>🍽️ Menú</a>
       <a href='/admin/{phone_id}/pedidos?pwd={pwd}'>📦 Pedidos</a>
     </nav>
-    {aviso}
+    {aviso}{aviso_editado}
     <div class='card'>
       <h2>Productos en el menú</h2>
+      <p style='color:#94a3b8;font-size:.85rem;margin-top:-8px'>Edita cualquier campo y da clic en "Guardar" en esa fila para aplicar el cambio.</p>
+      <div style='overflow-x:auto'>
       <table>
-        <tr><th>Nombre</th><th>Descripción</th><th>Categoría</th><th>Precio</th><th></th></tr>
+        <tr><th>Nombre</th><th>Descripción</th><th>Categoría</th><th>Precio</th><th>Disp.</th><th colspan='2'></th></tr>
         {filas}
       </table>
+      </div>
     </div>
     <div class='card'>
       <h2>Agregar producto</h2>
@@ -502,6 +527,22 @@ async def panel_menu_agregar(
     return RedirectResponse(f"/admin/{phone_id}/menu?pwd={pwd}&msg=ok", status_code=303)
 
 
+@router.post("/admin/{phone_id}/menu/editar")
+async def panel_menu_editar(
+    phone_id: str, pwd: str = "",
+    item_id: int = Form(0), nombre: str = Form(""), precio: float = Form(0),
+    categoria: str = Form("General"), descripcion: str = Form(""),
+    disponible: bool = Form(False),
+):
+    negocio = _neg(phone_id)
+    if not negocio or not _auth(negocio, pwd):
+        return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
+    from main import _menu_cache
+    db.actualizar_item_menu(item_id, nombre, precio, descripcion, categoria, disponible)
+    _menu_cache[negocio["id"]] = db.cargar_menu(negocio["id"])
+    return RedirectResponse(f"/admin/{phone_id}/menu?pwd={pwd}&msg=editado", status_code=303)
+
+
 @router.post("/admin/{phone_id}/menu/eliminar")
 async def panel_menu_eliminar(phone_id: str, pwd: str = "", item_id: int = Form(0)):
     negocio = _neg(phone_id)
@@ -525,9 +566,12 @@ async def panel_pedidos(phone_id: str, pwd: str = ""):
     def badge(estado):
         return f"<span class='badge badge-{estado}'>{estado.replace('_',' ').title()}</span>"
 
-    def fmt_items(items):
-        if not items: return "—"
-        return ", ".join(f"{i['cantidad']}x {i['nombre']}" for i in items)
+    def fmt_items(items, extras=None):
+        if not items and not extras: return "—"
+        partes = [f"{i['cantidad']}x {i['nombre']}" for i in (items or [])]
+        for e in (extras or []):
+            partes.append(f"+{e.get('cantidad',1)}x {e['ingrediente']} extra")
+        return ", ".join(partes)
 
     def fila(p):
         es_pendiente_pago = p.get("estado") == "pendiente_pago"
@@ -545,7 +589,7 @@ async def panel_pedidos(phone_id: str, pwd: str = ""):
             f"<td>#{p['id']}</td>"
             f"<td>{p.get('nombre_cliente','—')}</td>"
             f"<td>{p.get('telefono','—')}</td>"
-            f"<td>{fmt_items(p.get('items',[]))}</td>"
+            f"<td>{fmt_items(p.get('items',[]), p.get('extras_pedido',[]))}</td>"
             f"<td>${float(p.get('total',0)):.2f}</td>"
             f"<td>{'🛵 Envío' if p.get('tipo_entrega')=='envio' else '🏪 Recoger'}</td>"
             f"<td>{badge(p.get('estado','nuevo'))}</td>"
@@ -685,6 +729,9 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   border-top:1px solid var(--linea); padding-top:10px; }}
 .items li {{ font-size:1.1rem; display:flex; gap:8px; }}
 .items .cant {{ font-weight:800; color:var(--nuevo); min-width:32px; }}
+.items li.extra {{ font-size:.95rem; color:#93c5fd; }}
+.items li.extra .cant {{ color:#60a5fa; }}
+.items li.extra i {{ color:var(--tenue); font-style:normal; }}
 .nota {{ background:rgba(239,68,68,.15); border:1px solid rgba(239,68,68,.4);
   color:#fca5a5; padding:8px 10px; border-radius:8px; font-size:.95rem; }}
 .dir {{ font-size:.9rem; color:var(--tenue); }}
@@ -753,6 +800,8 @@ function tarjeta(p){{
   const clase=p.estado==='nuevo'?'nuevo':p.estado;
   const items=(p.items||[]).map(i=>
     `<li><span class='cant'>${{i.cantidad}}x</span> ${{i.nombre}}</li>`).join('');
+  const extras=(p.extras_pedido||[]).map(e=>
+    `<li class='extra'><span class='cant'>+${{e.cantidad||1}}x</span> ${{e.ingrediente}} <i>(en ${{e.producto}})</i></li>`).join('');
   const nota=p.notas?`<div class='nota'>📝 ${{p.notas}}</div>`:'';
   const tipo=p.tipo_entrega==='envio'
     ?`<div class='tipo envio'>🛵 Envío</div><div class='dir'>${{p.direccion||''}}</div>`
@@ -770,7 +819,7 @@ function tarjeta(p){{
       <div class='tiempo ${{urgente}}'>${{min}} min</div></div>
     <div class='cliente'>${{p.nombre_cliente||'Cliente'}}</div>
     ${{tipo}}
-    <ul class='items'>${{items}}</ul>
+    <ul class='items'>${{items}}${{extras}}</ul>
     ${{nota}}
     <div class='acciones'>${{btn}}</div>
     ${{btnCopiar}}
@@ -792,6 +841,7 @@ function copiarReparto(id){{
   lineas.push('');
   lineas.push('🍽️ *Pedido:*');
   (p.items||[]).forEach(i=> lineas.push(`  • ${{i.cantidad}}x ${{i.nombre}}`));
+  (p.extras_pedido||[]).forEach(e=> lineas.push(`  • +${{e.cantidad||1}}x ${{e.ingrediente}} extra (en ${{e.producto}})`));
   if(p.notas) lineas.push(`\\n📝 Notas: ${{p.notas}}`);
   lineas.push('');
   lineas.push(`💰 Total: $${{Number(p.total).toFixed(2)}}`);

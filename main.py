@@ -95,7 +95,7 @@ def enviar_whatsapp(telefono: str, mensaje: str, token: str, phone_id: str,
 
 def _html_correo_pedido(negocio: str, nombre: str, telefono: str, items: list,
                          total: float, tipo: str, direccion: str, metodo_pago: str,
-                         notas: str = "") -> str:
+                         notas: str = "", extras: list = None) -> str:
     color = "#2563eb"
     emoji = "🛵" if tipo == "envio" else "🏪"
     tipo_texto = "Envío a domicilio" if tipo == "envio" else "Para recoger en local"
@@ -105,6 +105,14 @@ def _html_correo_pedido(negocio: str, nombre: str, telefono: str, items: list,
         f"<td style='padding:4px 8px;text-align:right'>${i['precio']*i['cantidad']:.2f}</td></tr>"
         for i in items
     )
+    if extras:
+        filas += "".join(
+            f"<tr><td style='padding:4px 8px;color:#2563eb'>+ {html.escape(e['ingrediente'])} extra "
+            f"(en {html.escape(e['producto'])})</td>"
+            f"<td style='padding:4px 8px;text-align:center'>{e.get('cantidad',1)}</td>"
+            f"<td style='padding:4px 8px;text-align:right'>${15.00*e.get('cantidad',1):.2f}</td></tr>"
+            for e in extras
+        )
     dir_html = (
         f"<tr><td style='color:#6b7280;padding:4px 8px'>Dirección</td>"
         f"<td colspan='2' style='padding:4px 8px'><b>{html.escape(direccion)}</b></td></tr>"
@@ -195,10 +203,24 @@ def notificar_dueno(email: str, asunto: str, html_body: str):
 # Ej: Bistec 3x$60 -> si piden 7, son 2 paquetes de 3 ($120) + 1 individual
 # ($25) = $145, no 7 x $25 = $175.
 _PROMOS_TACOS = {
-    "Taco de Pastor":  {"paquete": 2, "precio_paquete": 26.00},  # 2x1: paga 1 ($26), lleva 2
-    "Taco de Bistec":  {"paquete": 3, "precio_paquete": 60.00},  # 3x$60
-    "Taco de Sirloin": {"paquete": 2, "precio_paquete": 50.00},  # 2x$50
-    "Taco de Chorizo": {"paquete": 3, "precio_paquete": 55.00},  # 3x$55
+    "Taco de Pastor":            {"paquete": 2, "precio_paquete": 26.00},  # 2x1: paga 1 ($26), lleva 2
+    "Taco de Bistec":            {"paquete": 3, "precio_paquete": 60.00},  # 3x$60
+    "Taco de Sirloin":           {"paquete": 2, "precio_paquete": 50.00},  # 2x$50
+    "Taco de Chorizo":           {"paquete": 3, "precio_paquete": 60.00},  # 3x$60 (corregido, antes $55)
+    "Taco de Chorizo Argentino": {"paquete": 2, "precio_paquete": 50.00},  # 2x$50
+    "Taco Campechano":           {"paquete": 3, "precio_paquete": 65.00},  # 3x$65
+}
+
+# Ingredientes extra: $15 cada uno, sin importar cual sea — confirmado por
+# el dueño. Lista cerrada para validar contra alucinaciones del LLM (no
+# debe inventar que algo es "extra" si no esta en esta lista real).
+_VALOR_EXTRA = 15.00
+_INGREDIENTES_EXTRA_VALIDOS = {
+    "pastor", "bistec de res", "bistec", "sirloin", "chorizo",
+    "queso oaxaca", "queso amarillo", "queso", "jamón", "jamon", "tocino",
+    "cebolla", "champiñones", "champiñon", "pimiento", "piña",
+    "orden de tortillas", "tortillas", "orden de cebolla asada",
+    "cebolla asada", "aguacate", "jitomate",
 }
 
 
@@ -232,11 +254,17 @@ def _extraer_pago_de_notas(notas_raw: str) -> tuple:
     return metodo, notas_limpias
 
 
-def _calcular_total(carrito: list) -> float:
-    return sum(_precio_linea(i["nombre"], i["cantidad"], i["precio"]) for i in carrito)
+def _calcular_total_extras(extras: list) -> float:
+    """Suma el costo de todos los ingredientes extra ($15 c/u)."""
+    return sum(_VALOR_EXTRA * e.get("cantidad", 1) for e in (extras or []))
 
 
-def _formato_carrito(carrito: list, costo_envio: float = 0) -> str:
+def _calcular_total(carrito: list, extras: list = None) -> float:
+    total_carrito = sum(_precio_linea(i["nombre"], i["cantidad"], i["precio"]) for i in carrito)
+    return total_carrito + _calcular_total_extras(extras)
+
+
+def _formato_carrito(carrito: list, costo_envio: float = 0, extras: list = None) -> str:
     if not carrito:
         return "🛒 Tu carrito está vacío."
     lineas = ["🛒 *Tu pedido:*"]
@@ -246,7 +274,14 @@ def _formato_carrito(carrito: list, costo_envio: float = 0) -> str:
         tiene_promo = promo and i["cantidad"] >= promo["paquete"]
         etiqueta_promo = " 🎉" if tiene_promo else ""
         lineas.append(f"  • {i['cantidad']}x {i['nombre']} — {_fmt_precio(subtotal)}{etiqueta_promo}")
-    total = _calcular_total(carrito)
+    for e in (extras or []):
+        cant_e = e.get("cantidad", 1)
+        prefijo_cant = f"{cant_e}x " if cant_e > 1 else ""
+        lineas.append(
+            f"  • + {prefijo_cant}{e['ingrediente']} extra (en {e['producto']}) — "
+            f"{_fmt_precio(_VALOR_EXTRA * cant_e)}"
+        )
+    total = _calcular_total(carrito, extras)
     if costo_envio > 0:
         lineas.append(f"  • Envío — {_fmt_precio(costo_envio)}")
         lineas.append(f"\n💰 *Total: {_fmt_precio(total + costo_envio)}*")
@@ -730,6 +765,66 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
             print(f"   [{nombre_neg}] Fuera de horario — mensaje de cerrado enviado.")
             return
 
+        # ── CAPTURA DE UBICACIÓN GPS — RED DE SEGURIDAD ─────────────────────
+        # Si el cliente comparte su ubicación real de WhatsApp pero el flujo
+        # determinístico NO está en fase "direccion" (ej. el LLM, en modo
+        # libre, le pidió la dirección sin llamar cerrar_pedido primero —
+        # un bug real visto en producción), esto la captura de todas formas
+        # en vez de dejar que se pierda en el limbo del LLM libre. Sin esto,
+        # un cliente puede compartir su ubicación GPS real y el sistema la
+        # ignora por completo, perdiendo el pedido.
+        if coords_ubicacion and fase != "direccion":
+            if not carrito:
+                resp = (
+                    "Veo que compartiste tu ubicación, pero todavía no tienes nada en tu "
+                    "carrito. 😊 ¿Qué te gustaría ordenar?"
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:])
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Ubicación recibida sin carrito activo — ignorada con aviso.")
+                return
+            # Hay carrito activo: forzamos tipo_entrega=envio y tratamos esto
+            # como si el cliente ya hubiera elegido envío y compartido su
+            # ubicación en la fase correcta — replicando el mismo cálculo
+            # dinámico que se haría normalmente.
+            print(f"   [{nombre_neg}] Ubicación GPS capturada fuera de fase 'direccion' (red de seguridad activada).")
+            if envio_dinamico and coords_negocio:
+                resultado = geo.calcular_envio_desde_coords(coords_ubicacion, coords_negocio, lluvia=modo_lluvia)
+                if resultado["ok"]:
+                    costo_calculado = resultado["costo"]
+                    km = resultado["km"]
+                    lat, lng = coords_ubicacion
+                    direccion_capturada = f"📍 Ubicación compartida ({km} km)\nhttps://maps.google.com/?q={lat},{lng}"
+                    resp = (
+                        f"📍 Recibí tu ubicación (Distancia: {km} km — Envío: {_fmt_precio(costo_calculado)}).\n"
+                        f"¿A nombre de quién registramos el pedido?"
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="nombre",
+                                      tipo_entrega="envio", direccion_entrega=direccion_capturada,
+                                      carrito=carrito, costo_envio_calc=costo_calculado)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    return
+                elif "Fuera de cobertura" in resultado["razon"]:
+                    resp = (
+                        f"Tu ubicación está fuera de nuestra zona de cobertura para envío "
+                        f"({resultado['km']} km, máximo 20 km). "
+                        f"¿Prefieres pasar a recoger tu pedido al local?"
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo", carrito=carrito)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    return
+            resp = (
+                "Recibí tu ubicación, pero no pude calcular el envío automáticamente. 😕\n"
+                "¿Podrías llamarnos directo para confirmar tu pedido y el costo de envío?"
+            )
+            nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+            db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="armando", carrito=carrito)
+            enviar_whatsapp(telefono, resp, token, phone_number_id)
+            return
+
         # ── SALUDO INICIAL DETERMINISTICO ───────────────────────────────────
         # Si el mensaje es UNICAMENTE un saludo (sin nada mas, ej. "Hola",
         # "Buenas tardes") y no hay carrito/fase activa, respondemos con el
@@ -763,8 +858,9 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 nombre_cl    = sesion["nombre_cliente"]
                 direccion    = sesion["direccion_entrega"]
                 notas_raw    = sesion.get("notas_pedido", "")
+                extras_sesion = sesion.get("extras_pedido", [])
                 costo_envio_real = sesion.get("costo_envio_calc", 0)
-                total        = _calcular_total(carrito)
+                total        = _calcular_total(carrito, extras_sesion)
                 total_con_envio = total + (costo_envio_real if tipo_entrega == "envio" else 0)
 
                 # Extraer el metodo de pago si viene en el prefijo [PAGO:..]
@@ -796,6 +892,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                         metodo_pago=metodo_pago_usado,
                         estado_pago="pendiente",
                         estado_inicial="pendiente_pago",
+                        extras_pedido=extras_sesion,
                     )
                     if not pedido_id:
                         resp = "Hubo un problema guardando tu pedido. Por favor intenta de nuevo en un momento."
@@ -849,16 +946,24 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                     total=total_con_envio, tipo_entrega=tipo_entrega,
                     direccion=direccion, notas=notas,
                     metodo_pago=metodo_pago_usado,
+                    extras_pedido=extras_sesion,
                 )
                 tiempo = tiempo_env if tipo_entrega == "envio" else tiempo_rec
                 notas_linea = f"📝 {notas}\n" if notas else ""
                 pago_linea = f"💳 Pago: *{metodo_pago_usado}*\n" if metodo_pago_usado else ""
+                extras_linea = ""
+                if extras_sesion:
+                    extras_txt = ", ".join(
+                        f"{e.get('cantidad',1)}x {e['ingrediente']} (en {e['producto']})" for e in extras_sesion
+                    )
+                    extras_linea = f"➕ Extras: {extras_txt}\n"
                 resp = (
                     f"✅ *¡Pedido #{pedido_id} confirmado!*\n\n"
                     f"👤 *{nombre_cl}*\n"
                     f"{'🛵 Envío a: ' + direccion if tipo_entrega == 'envio' else '🏪 Para recoger en el local'}\n"
                     f"{pago_linea}"
                     f"{notas_linea}"
+                    f"{extras_linea}"
                     f"⏱ Tiempo estimado: *{tiempo} minutos*\n"
                     f"💰 Total: *{_fmt_precio(total_con_envio)}*\n\n"
                     f"¡Gracias por tu preferencia! 🌮\n"
@@ -872,6 +977,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                             nombre_neg, nombre_cl, telefono, carrito,
                             total_con_envio, tipo_entrega, direccion,
                             metodo_pago_usado or metodos_pago, notas,
+                            extras=extras_sesion,
                         ),
                     )
                 db.limpiar_sesion(llave)
@@ -964,8 +1070,9 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 # limpiamos por seguridad — si quedo arrastrado de un pedido
                 # anterior, NUNCA debe mostrarse crudo al cliente.
                 _, notas = _extraer_pago_de_notas(sesion.get("notas_pedido", ""))
-                total        = _calcular_total(carrito)
-                resumen = _formato_carrito(carrito)
+                extras_sesion = sesion.get("extras_pedido", [])
+                total        = _calcular_total(carrito, extras_sesion)
+                resumen = _formato_carrito(carrito, extras=extras_sesion)
                 notas_linea = f"📝 *Notas:* {notas}\n" if notas else ""
                 resp = (
                     f"📋 *Resumen de tu pedido*\n"
@@ -1029,10 +1136,11 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 # si no se hace esto, un [PAGO:Tarjeta] viejo termina
                 # mostrandose crudo, o anidado dentro de un nuevo [PAGO:..].
                 _, notas = _extraer_pago_de_notas(sesion.get("notas_pedido", ""))
+                extras_sesion = sesion.get("extras_pedido", [])
                 costo_envio_real = sesion.get("costo_envio_calc", 0)
-                total        = _calcular_total(carrito)
+                total        = _calcular_total(carrito, extras_sesion)
                 total_con_envio = total + costo_envio_real
-                resumen = _formato_carrito(carrito, costo_envio_real)
+                resumen = _formato_carrito(carrito, costo_envio_real, extras_sesion)
                 notas_linea = f"📝 *Notas:* {notas}\n" if notas else ""
                 resp = (
                     f"📋 *Resumen de tu pedido*\n"
@@ -1308,6 +1416,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
 
         # Herramientas disponibles para el modelo
         carrito_estado = list(carrito)  # mutable dentro del turno
+        extras_estado = list(sesion.get("extras_pedido", []))  # mutable dentro del turno
 
         @tool
         def ver_menu() -> str:
@@ -1378,13 +1487,53 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                     "cantidad": max(1, cantidad),
                 })
 
-            carrito_txt = _formato_carrito(carrito_estado)
-            subtotal = _calcular_total(carrito_estado)
+            carrito_txt = _formato_carrito(carrito_estado, extras=extras_estado)
+            subtotal = _calcular_total(carrito_estado, extras_estado)
             aviso_min = ""
             if pedido_min > 0 and subtotal < pedido_min:
                 falta = pedido_min - subtotal
                 aviso_min = f"\n\n_Te faltan {_fmt_precio(falta)} para el pedido mínimo de {_fmt_precio(pedido_min)}._"
             return f"{carrito_txt}{aviso_min}\n\n¿Algo más, o ya sería todo? 😊"
+
+        @tool
+        def agregar_extra(producto: str, ingrediente: str, cantidad: int = 1) -> str:
+            """Agrega un ingrediente EXTRA a un producto que YA está en el
+            carrito, con cargo de $15 cada uno. Ejemplos: cliente dice 'con
+            extra queso' o 'agrégale aguacate extra a la hamburguesa'.
+            producto: nombre del platillo al que se le agrega el extra (debe
+            coincidir con algo que ya esté en el carrito).
+            ingrediente: el ingrediente extra exacto que pidió el cliente
+            (ej. 'queso oaxaca', 'aguacate', 'tocino').
+            cantidad: cuántas porciones extra de ese ingrediente (default 1).
+            IMPORTANTE: solo existen extras de ingredientes reales del menú
+            (carnes, quesos, verduras, tortillas) — NUNCA inventes un extra
+            que no tenga sentido como ingrediente de cocina."""
+            item_match = _buscar_en_menu(producto, [{"nombre": c["nombre"]} for c in carrito_estado])
+            nombre_producto_real = item_match["nombre"] if item_match else producto
+            en_carrito = any(c["nombre"].lower() == nombre_producto_real.lower() for c in carrito_estado)
+            if not en_carrito:
+                return (
+                    f"No encontré '{producto}' en el carrito todavía — agrégalo primero "
+                    f"y luego puedo añadirle el extra."
+                )
+            ingrediente_norm = _normalizar_txt(ingrediente)
+            es_valido = any(ingrediente_norm == _normalizar_txt(v) or ingrediente_norm in _normalizar_txt(v) or _normalizar_txt(v) in ingrediente_norm
+                            for v in _INGREDIENTES_EXTRA_VALIDOS)
+            if not es_valido:
+                lista = ", ".join(sorted({
+                    "pastor", "bistec de res", "sirloin", "chorizo", "queso oaxaca",
+                    "queso amarillo", "jamón", "tocino", "cebolla", "champiñones",
+                    "pimiento", "piña", "orden de tortillas", "orden de cebolla asada",
+                    "aguacate", "jitomate",
+                }))
+                return f"'{ingrediente}' no está en la lista de extras disponibles. Los extras válidos son: {lista}."
+            extras_estado.append({
+                "producto": nombre_producto_real,
+                "ingrediente": ingrediente.strip(),
+                "cantidad": max(1, cantidad),
+            })
+            carrito_txt = _formato_carrito(carrito_estado, extras=extras_estado)
+            return f"{carrito_txt}\n\n¿Algo más, o ya sería todo? 😊"
 
         @tool
         def quitar_del_carrito(nombre_producto: str, cantidad: int = 0) -> str:
@@ -1419,7 +1568,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 sesion.get("costo_envio_calc", 0)
                 if sesion.get("tipo_entrega") == "envio" else 0
             )
-            return _formato_carrito(carrito_estado, costo_a_mostrar)
+            return _formato_carrito(carrito_estado, costo_a_mostrar, extras_estado)
 
         @tool
         def guardar_nota(nota: str) -> str:
@@ -1452,7 +1601,7 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 return "El carrito está vacío. Pide algo del menú primero."
             return "INICIAR_CIERRE"
 
-        tools = [ver_menu, info_producto, agregar_al_carrito, quitar_del_carrito, ver_carrito, guardar_nota, cerrar_pedido]
+        tools = [ver_menu, info_producto, agregar_al_carrito, agregar_extra, quitar_del_carrito, ver_carrito, guardar_nota, cerrar_pedido]
 
         horarios = negocio.get("horarios_texto", "")
         base_conoc = negocio.get("base_conocimiento", "")
@@ -1482,6 +1631,9 @@ REGLAS IMPORTANTES:
 - Cuando el cliente pida algo especial (sin cilantro, sin cebolla, extra queso, bien cocido, etc.), usa guardar_nota para registrarlo. NUNCA ignores estas instrucciones.
 - NO llames agregar_al_carrito y cerrar_pedido en el mismo mensaje, NUNCA. Si el cliente responde "sí" confirmando que agregues algo (ej. tú preguntaste "¿agrego las aguas?" y dice "sí"), eso SOLO significa agregar ese producto — NO es señal de que terminó su pedido. Después de agregar, SIEMPRE pregunta "¿algo más, o ya sería todo?" y espera la respuesta del cliente antes de considerar cerrar_pedido.
 - Solo llama cerrar_pedido cuando el cliente lo diga EXPLÍCITAMENTE con frases como "es todo", "ya es todo", "nada más", "eso sería todo", "con eso es todo" — un simple "sí" respondiendo a otra pregunta tuya NUNCA cuenta como esto.
+- NUNCA preguntes tú mismo la dirección, ubicación, o tipo de entrega (recoger/envío) de forma libre — eso SIEMPRE debe pasar por cerrar_pedido. Si el cliente menciona "a domicilio" o "envío" de pasada mientras sigue agregando productos, no le preguntes la dirección todavía — sigue tomando su pedido normal hasta que diga explícitamente que ya terminó, y AHÍ llama cerrar_pedido, que se encargará de pedir la dirección correctamente.
+- Las salsas, tipo de cocción, o personalizaciones similares NO son productos independientes del menú — son atributos de un platillo. NUNCA llames agregar_al_carrito para "salsa roja", "salsa verde", etc. Si el cliente elige una salsa para algo que ya está en su carrito, usa guardar_nota para anotarlo (ej. "Que Me Ves con salsa roja"), nunca intentes agregarla como producto nuevo.
+- Si el cliente pide un ingrediente EXTRA con costo adicional (ej. "con extra queso", "agrégale aguacate de más", "doble tocino"), usa la herramienta agregar_extra — NUNCA agregar_al_carrito ni guardar_nota para esto, porque agregar_extra es la única que suma el costo correcto ($15) al total. Si el cliente solo dice cómo quiere el platillo SIN que sea claramente un extra con costo (ej. "sin cebolla", "bien dorado"), eso sigue siendo guardar_nota, no agregar_extra.
 - REGLA CRÍTICA: si el cliente responde solo "sí", "ok", "va", "dale", "claro" u otra confirmación corta SIN mencionar ningún producto nuevo, NUNCA llames agregar_al_carrito repitiendo el último producto que pidió — eso duplicaría su pedido por error y es un fallo grave. Una confirmación corta sin producto nuevo significa que está de acuerdo con algo que dijiste (el carrito, el precio, etc.), no que quiera repetir la compra. Si no tienes claro a qué se refiere, pregúntale qué más desea agregar.
 - Cuando agregues uno o varios productos, el resultado de agregar_al_carrito ya trae el carrito completo con precios y subtotal formateado. Usa ESE texto en tu respuesta tal cual (puedes agregar una frase corta antes como "¡Listo! Así va tu pedido:"), NUNCA reescribas la lista de productos tú mismo ni inventes cómo agrupar las cantidades — eso causa errores graves como mostrar productos duplicados o cantidades incorrectas.
 - Si el cliente pide algo que no está en el menú, indícalo claramente y ofrece alternativas.
@@ -1544,13 +1696,29 @@ REGLAS IMPORTANTES:
                 # Ya estaba en el carrito con la misma cantidad...
                 if carrito_previo.get(nombre) != cant:
                     return False
-                # ...y o bien viene una nota en el mismo turno (instruccion
-                # sobre el producto ya agregado), o el cliente NO menciono
-                # ningun producto en su mensaje (confirmacion vaga) -> en
-                # cualquiera de los dos casos, es un re-agregado erroneo.
+                # ...y se cumple alguna de estas 3 señales de re-agregado
+                # erroneo (el LLM repitiendo algo del historial sin que el
+                # cliente lo haya pedido de nuevo en ESTE mensaje):
                 if hay_nota:
                     return True
                 if es_confirmacion_corta:
+                    return True
+                # 3) NO TODAS las palabras significativas del nombre del
+                #    producto aparecen en el mensaje actual del cliente
+                #    (se requieren todas, no solo una, porque varios
+                #    productos comparten palabras como "pastor"/"bistec" —
+                #    ej. Taco de Pastor y Hamburguesa de Pastor comparten
+                #    "pastor", así que NO basta con que esa palabra aparezca).
+                #    Esto detecta casos como "Y 3 tacos de pastor y 1 orden
+                #    de bistec" donde el modelo re-agrega "Hamburguesa de
+                #    Pastor" (ya en el carrito) sin que el cliente la haya
+                #    mencionado en absoluto en este turno — un bug real
+                #    visto en producción que duplicó hamburguesas.
+                palabras_nombre = [
+                    p for p in _normalizar_txt(nombre).split()
+                    if p not in _PALABRAS_RELLENO and len(p) > 2
+                ]
+                if palabras_nombre and not all(p in texto_low for p in palabras_nombre):
                     return True
                 return False
 
@@ -1618,6 +1786,7 @@ REGLAS IMPORTANTES:
                     "ver_menu":           ver_menu,
                     "info_producto":      info_producto,
                     "agregar_al_carrito": agregar_al_carrito,
+                    "agregar_extra":      agregar_extra,
                     "quitar_del_carrito": quitar_del_carrito,
                     "ver_carrito":        ver_carrito,
                     "guardar_nota":       guardar_nota,
@@ -1640,7 +1809,7 @@ REGLAS IMPORTANTES:
             tools_llamadas = [tc["name"] for tc in resp_llm.tool_calls]
             si_respuesta_directa = (
                 len(tools_llamadas) == 1
-                and tools_llamadas[0] in ("ver_menu", "info_producto", "agregar_al_carrito", "ver_carrito")
+                and tools_llamadas[0] in ("ver_menu", "info_producto", "agregar_al_carrito", "agregar_extra", "ver_carrito")
                 and not iniciar_cierre
             )
             if si_respuesta_directa:
@@ -1659,7 +1828,8 @@ REGLAS IMPORTANTES:
 
         # Guardar carrito actualizado (puede haber cambiado por las tools)
         nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=texto_respuesta or "")]
-        db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], carrito=carrito_estado, fase_pedido=fase)
+        db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], carrito=carrito_estado,
+                          fase_pedido=fase, extras_pedido=extras_estado)
 
         # Si la tool cerrar_pedido devolvio INICIAR_CIERRE, arrancamos el flujo
         # deterministico de cierre (tipo de entrega)
@@ -1676,7 +1846,7 @@ REGLAS IMPORTANTES:
             if tipo_entrega_previo == "recoger" and nombre_previo:
                 # Ya tenemos todo lo necesario para recoger -> resumen directo
                 _, notas_limpias = _extraer_pago_de_notas(sesion.get("notas_pedido", ""))
-                resumen = _formato_carrito(carrito_estado)
+                resumen = _formato_carrito(carrito_estado, extras=extras_estado)
                 notas_linea = f"📝 *Notas:* {notas_limpias}\n" if notas_limpias else ""
                 resp_cierre = (
                     f"📋 *Resumen de tu pedido*\n"
@@ -1690,7 +1860,7 @@ REGLAS IMPORTANTES:
                     f"❌ *NO* para modificar"
                 )
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="confirmando",
-                                  carrito=carrito_estado)
+                                  carrito=carrito_estado, extras_pedido=extras_estado)
                 enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
                 print(f"   [{nombre_neg}] Cierre reutilizando datos previos (recoger) — directo a confirmación.")
                 return
@@ -1706,7 +1876,7 @@ REGLAS IMPORTANTES:
                     f"¿Cómo deseas pagar? Opciones: *{metodos_lista}*"
                 )
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="pago",
-                                  carrito=carrito_estado)
+                                  carrito=carrito_estado, extras_pedido=extras_estado)
                 enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
                 print(f"   [{nombre_neg}] Cierre reutilizando datos previos (envío) — directo a método de pago.")
                 return
@@ -1715,30 +1885,30 @@ REGLAS IMPORTANTES:
             # el flujo desde el principio.
             if tipo_servicio == "recoger":
                 resp_cierre = (
-                    f"{_formato_carrito(carrito_estado)}\n\n"
+                    f"{_formato_carrito(carrito_estado, extras=extras_estado)}\n\n"
                     "¿Es para recoger en el local?"
                 )
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="nombre",
-                                  tipo_entrega="recoger", carrito=carrito_estado)
+                                  tipo_entrega="recoger", carrito=carrito_estado, extras_pedido=extras_estado)
                 enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
             elif tipo_servicio == "envio":
                 resp_cierre = (
-                    f"{_formato_carrito(carrito_estado)}\n"
+                    f"{_formato_carrito(carrito_estado, extras=extras_estado)}\n"
                     "_El costo de envío se calculará según tu dirección._\n\n"
                     "¿Cuál es tu dirección de entrega? 📍 También puedes compartir tu ubicación con el clip de WhatsApp para mayor precisión."
                 )
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion",
-                                  tipo_entrega="envio", carrito=carrito_estado)
+                                  tipo_entrega="envio", carrito=carrito_estado, extras_pedido=extras_estado)
                 enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
             else:
                 # ambos: preguntar primero, NUNCA mostrar costo de envio aqui
                 # porque todavia no sabemos si el cliente eligio envio.
                 resp_cierre = (
-                    f"{_formato_carrito(carrito_estado)}\n\n"
+                    f"{_formato_carrito(carrito_estado, extras=extras_estado)}\n\n"
                     "¿Es para *recoger en el local* o *envío a domicilio*?"
                 )
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo",
-                                  carrito=carrito_estado)
+                                  carrito=carrito_estado, extras_pedido=extras_estado)
                 enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
             print(f"   [{nombre_neg}] Cierre iniciado — carrito con {len(carrito_estado)} producto(s).")
             return

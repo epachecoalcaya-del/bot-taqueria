@@ -71,6 +71,23 @@ def agregar_item_menu(negocio_id: int, nombre: str, precio: float,
         return False
 
 
+def actualizar_item_menu(item_id: int, nombre: str, precio: float,
+                          descripcion: str = "", categoria: str = "General",
+                          disponible: bool = True) -> bool:
+    try:
+        _get_client().table("pedidos_menu").update({
+            "nombre":      nombre.strip(),
+            "descripcion": descripcion.strip(),
+            "precio":      precio,
+            "categoria":   categoria.strip() or "General",
+            "disponible":  disponible,
+        }).eq("id", item_id).execute()
+        return True
+    except Exception as e:
+        print(f"!!! DB error en actualizar_item_menu: {e}")
+        return False
+
+
 def eliminar_item_menu(item_id: int) -> bool:
     try:
         _get_client().table("pedidos_menu").delete().eq("id", item_id).execute()
@@ -115,6 +132,7 @@ def cargar_sesion(llave: str) -> dict:
                 "notas_pedido":           row.get("notas_pedido") or "",
                 "costo_envio_calc":       float(row.get("costo_envio_calc") or 0),
                 "updated_at":             row.get("updated_at") or "",
+                "extras_pedido":          row.get("extras_pedido") or [],
             }
     except Exception as e:
         print(f"!!! DB error en cargar_sesion ({llave}): {e}")
@@ -122,7 +140,7 @@ def cargar_sesion(llave: str) -> dict:
         "historial": [], "esperando_confirmacion": False,
         "carrito": [], "fase_pedido": "", "tipo_entrega": "",
         "direccion_entrega": "", "nombre_cliente": "", "notas_pedido": "",
-        "costo_envio_calc": 0, "updated_at": "",
+        "costo_envio_calc": 0, "updated_at": "", "extras_pedido": [],
     }
 
 
@@ -137,6 +155,7 @@ def guardar_sesion(
     nombre_cliente: Optional[str] = None,
     notas_pedido: Optional[str] = None,
     costo_envio_calc: Optional[float] = None,
+    extras_pedido: Optional[list] = None,
 ):
     """Guarda o actualiza la sesion. Los campos opcionales solo se
     actualizan si se pasan explicitamente (no None)."""
@@ -161,6 +180,8 @@ def guardar_sesion(
             datos["notas_pedido"] = notas_pedido
         if costo_envio_calc is not None:
             datos["costo_envio_calc"] = costo_envio_calc
+        if extras_pedido is not None:
+            datos["extras_pedido"] = extras_pedido
         _get_client().table("pedidos_sesiones").upsert(datos).execute()
     except Exception as e:
         print(f"!!! DB error en guardar_sesion ({llave}): {e}")
@@ -169,15 +190,13 @@ def guardar_sesion(
 def limpiar_sesion(llave: str):
     """Limpia el carrito y estado del pedido al terminar un pedido,
     pero conserva el historial para que el bot recuerde contexto previo.
-    IMPORTANTE: notas_pedido tambien se limpia — incluye el metodo de pago
-    guardado con el prefijo '[PAGO:...]', y si no se limpia se arrastra
-    al siguiente pedido del mismo cliente, causando que se cobre con el
-    metodo de pago equivocado."""
+    IMPORTANTE: notas_pedido y extras_pedido tambien se limpian — si no,
+    se arrastran al siguiente pedido del mismo cliente."""
     guardar_sesion(
         llave, [], False,
         carrito=[], fase_pedido="", tipo_entrega="",
         direccion_entrega="", nombre_cliente="", costo_envio_calc=0,
-        notas_pedido="",
+        notas_pedido="", extras_pedido=[],
     )
 
 
@@ -196,6 +215,7 @@ def guardar_pedido(
     estado_pago: str = "no_aplica",
     estado_inicial: str = "nuevo",
     mp_preference_id: Optional[str] = None,
+    extras_pedido: Optional[list] = None,
 ) -> Optional[int]:
     """Guarda un pedido. Si estado_pago es 'pendiente' (esperando pago con
     tarjeta/transferencia), el pedido se guarda pero con estado_inicial
@@ -214,6 +234,7 @@ def guardar_pedido(
             "notas":         notas,
             "estado":        estado_inicial,
             "estado_pago":   estado_pago,
+            "extras_pedido": extras_pedido or [],
         }
         if mp_preference_id:
             datos["mp_preference_id"] = mp_preference_id
