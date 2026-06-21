@@ -1181,9 +1181,13 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         # FASE: nombre — esperando el nombre del cliente
         if fase == "nombre":
             nombre_cl = texto.strip().title()
-            # Frases y palabras que NO son nombres
+            # Frases y palabras que NO son nombres. "vale" es ambiguo
+            # (significa "ok" pero tambien es apodo de Valentina/Valeria),
+            # asi que lo tratamos aparte: solo lo rechazamos si el cliente
+            # lo escribio en minusculas (señal de "ok"), no si lo escribio
+            # capitalizado como nombre propio.
             _NO_ES_NOMBRE_PALABRAS = {
-                "no","si","sí","ok","okay","vale","cancel","cancelar",
+                "no","si","sí","ok","okay","cancel","cancelar",
                 "modificar","cambiar","espera","otro","otra","nada","ninguno",
             }
             _NO_ES_NOMBRE_FRASES = [
@@ -1193,10 +1197,13 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 "nada mas","nada más",
             ]
             texto_lower_n = texto.lower().strip(".,!¡¿? ")
+            # "vale" solo cuenta como no-nombre si vino en minusculas
+            _vale_es_confirmacion = texto_lower_n == "vale" and texto.strip() == texto.strip().lower()
             es_nombre_valido = (
                 len(nombre_cl) >= 2
                 and not any(c.isdigit() for c in nombre_cl)
                 and texto_lower_n not in _NO_ES_NOMBRE_PALABRAS
+                and not _vale_es_confirmacion
                 and not any(f in texto_lower_n for f in _NO_ES_NOMBRE_FRASES)
                 and len(nombre_cl.split()) <= 4
             )
