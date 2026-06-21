@@ -10,6 +10,7 @@ import smtplib
 import requests
 import datetime
 import time
+import threading
 from email.mime.text import MIMEText
 from typing import Optional
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Form
@@ -705,7 +706,43 @@ def procesar_webhook_pago(payment_id: str):
 
 # ── PROCESAMIENTO PRINCIPAL ──────────────────────────────────────────────────
 
+# Candado por numero de telefono: el webhook dispara cada mensaje como una
+# tarea en segundo plano independiente (background_tasks.add_task), SIN
+# ninguna sincronizacion entre si. Si un cliente manda dos mensajes muy
+# seguidos (algo comun en WhatsApp), ambos podian terminar procesandose EN
+# PARALELO — cada uno leyendo la sesion ANTES de que el otro terminara de
+# guardar sus cambios, pisandose entre si y perdiendo parte del pedido (bug
+# real visto en pruebas: "3 tacos de pastor" + "Es todo" mandados muy
+# seguidos hicieron que el carrito se perdiera). Este candado obliga a que
+# los mensajes del MISMO numero se procesen uno a la vez, en orden — los de
+# numeros DISTINTOS siguen procesandose en paralelo sin estorbarse.
+_locks_telefono: dict = {}
+_locks_telefono_mutex = threading.Lock()
+
+
+def _obtener_candado(telefono: str) -> threading.Lock:
+    with _locks_telefono_mutex:
+        if telefono not in _locks_telefono:
+            _locks_telefono[telefono] = threading.Lock()
+        return _locks_telefono[telefono]
+
+
 def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubicacion=None):
+    candado = _obtener_candado(telefono)
+    # Timeout de seguridad: si por algun motivo un procesamiento anterior se
+    # queda atorado y nunca libera el candado, no queremos bloquear a ese
+    # cliente para siempre — despues de 30s seguimos de todas formas.
+    adquirido = candado.acquire(timeout=30)
+    try:
+        if not adquirido:
+            print(f"!!! No se pudo adquirir el candado para {telefono} en 30s, procesando de todas formas.")
+        _procesar_mensaje_interno(texto, telefono, phone_number_id, coords_ubicacion)
+    finally:
+        if adquirido:
+            candado.release()
+
+
+def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, coords_ubicacion=None):
     try:
         # Leemos la config del negocio SIEMPRE fresca de Supabase para que
         # cualquier cambio desde el panel aplique en el siguiente mensaje,
@@ -752,6 +789,13 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
         # cocina ya empezo a prepararlo). Esto funciona desde cualquier
         # fase y aunque el negocio este cerrado, porque cancelar es una
         # accion que no depende del horario.
+        #
+        # Tambien cubre el caso de un CARRITO A MEDIO ARMAR que todavia no
+        # se ha confirmado (sesion en progreso, sin pedido real en la DB
+        # todavia) — antes "cancelar" solo buscaba pedidos YA CONFIRMADOS y
+        # no hacia nada si el cliente apenas estaba armando su pedido,
+        # dejando el carrito viejo vivo en la sesion sin que el cliente se
+        # diera cuenta.
         _PALABRAS_CANCELAR = {"cancelar", "cancela", "cancelar pedido", "anular", "anula"}
         if texto_low.strip(".,!¡¿? ") in _PALABRAS_CANCELAR or texto_low.startswith("cancelar"):
             pedido_cancelable = db.buscar_pedido_cancelable(negocio_id, telefono)
@@ -763,12 +807,21 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 )
                 db.limpiar_sesion(llave)
                 print(f"   [{nombre_neg}] Pedido #{pedido_cancelable['id']} cancelado por el cliente.")
+            elif carrito:
+                resp = (
+                    "❌ Listo, cancelé tu pedido en progreso y vacié tu carrito. "
+                    "Si quieres empezar de nuevo, aquí estamos para ayudarte. 🌮"
+                )
+                db.limpiar_sesion(llave)
+                print(f"   [{nombre_neg}] Carrito en progreso (sin confirmar) cancelado por el cliente.")
             else:
                 resp = (
                     "No encontré ningún pedido tuyo que se pueda cancelar en este momento "
                     "(puede que ya esté en preparación — en ese caso contáctanos directo)."
                 )
+                print(f"   [{nombre_neg}] Cliente pidió cancelar pero no hay nada que cancelar.")
             enviar_whatsapp(telefono, resp, token, phone_number_id)
+            print(f"<- [{nombre_neg}] {resp[:80]}")
             return
 
         # Caducidad de sesion por inactividad: si una sesion con fase activa
@@ -1641,6 +1694,19 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
             El resultado SIEMPRE incluye el carrito completo actualizado con
             precios y subtotal — usa ese texto tal cual en tu respuesta al
             cliente, no lo reescribas ni lo resumas tú mismo."""
+            # RED DE SEGURIDAD: a veces el LLM no separa la cantidad del
+            # nombre del producto y pasa todo junto en nombre_producto (ej.
+            # nombre_producto="3 tacos de sirloin", cantidad=1 sin
+            # especificar) — esto hace que se agregue solo 1 pieza en vez
+            # de las 3 que el cliente pidio, un bug real visto en
+            # produccion. Si detectamos un numero al INICIO del nombre Y la
+            # cantidad sigue en su valor default (1, señal de que el LLM no
+            # la extrajo aparte), tomamos ese numero como la cantidad real.
+            match_cantidad = re.match(r'^(\d+)\s+(.+)', nombre_producto.strip())
+            if match_cantidad and cantidad == 1:
+                cantidad = int(match_cantidad.group(1))
+                nombre_producto = match_cantidad.group(2)
+
             coincidencias = _buscar_coincidencias(nombre_producto, menu)
 
             if not coincidencias:
@@ -1651,8 +1717,15 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                 opciones = "\n".join(
                     f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in coincidencias
                 )
+                # Si la cantidad pedida es >1, la incluimos en el texto de
+                # forma parseable (ver RED DE SEGURIDAD mas abajo) para no
+                # perderla cuando el cliente resuelva la ambiguedad sin
+                # repetir el numero (ej. responde "el normal" en vez de
+                # "2 del normal") — bug real visto en produccion donde la
+                # cantidad original se perdia y solo se agregaba 1 pieza.
+                sufijo_cant = f" (cantidad: {cantidad})" if cantidad > 1 else ""
                 return (
-                    f"Tenemos varias opciones, ¿cuál te gustaría? 😊\n{opciones}"
+                    f"Tenemos varias opciones, ¿cuál te gustaría? 😊\n{opciones}{sufijo_cant}"
                 )
 
             item = coincidencias[0]
@@ -1679,7 +1752,27 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
                     opciones = "\n".join(
                         f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in coincidencias_fieles
                     )
-                    return f"Tenemos varias opciones, ¿cuál te gustaría? 😊\n{opciones}"
+                    sufijo_cant = f" (cantidad: {cantidad})" if cantidad > 1 else ""
+                    return f"Tenemos varias opciones, ¿cuál te gustaría? 😊\n{opciones}{sufijo_cant}"
+
+            # RED DE SEGURIDAD: si la pregunta de desambiguacion MAS
+            # RECIENTE en el historial menciona este mismo producto y
+            # tenia una cantidad >1 pendiente, pero llegamos aqui con
+            # cantidad=1 (el default, sin especificar), recuperamos esa
+            # cantidad en vez de perderla — pasa cuando el cliente
+            # responde a la desambiguacion sin repetir el numero (ej. "el
+            # normal" en vez de "2 del normal"), o incluso cambia de tema
+            # y el LLM "adivina" una opcion sin la cantidad original.
+            if cantidad == 1:
+                ultimo_ai = ""
+                for m in reversed(historial):
+                    if isinstance(m, AIMessage):
+                        ultimo_ai = m.content
+                        break
+                if "Tenemos varias opciones" in ultimo_ai and item["nombre"] in ultimo_ai:
+                    match_cant_previa = re.search(r'\(cantidad: (\d+)\)', ultimo_ai)
+                    if match_cant_previa:
+                        cantidad = int(match_cant_previa.group(1))
 
             ya_existia = False
             for c in carrito_estado:
@@ -1844,6 +1937,7 @@ REGLAS IMPORTANTES:
 - NUNCA inventes ni elijas tú una variante específica (ej. sabor, tamaño) que el cliente no haya mencionado. Si el cliente dice "una agua de litro" sin decir el sabor, pasa nombre_producto="agua de litro" tal cual a agregar_al_carrito — NO adivines ni elijas "Agua Jamaica" o cualquier otro sabor por tu cuenta. La herramienta se encarga de preguntar si hay varias opciones; tu trabajo es pasar las palabras del cliente sin agregarles nada que él no dijo.
 - REGLA CRÍTICA: si el cliente responde solo "sí", "ok", "va", "dale", "claro" u otra confirmación corta SIN mencionar ningún producto nuevo, NUNCA llames agregar_al_carrito repitiendo el último producto que pidió — eso duplicaría su pedido por error y es un fallo grave. Una confirmación corta sin producto nuevo significa que está de acuerdo con algo que dijiste (el carrito, el precio, etc.), no que quiera repetir la compra. Si no tienes claro a qué se refiere, pregúntale qué más desea agregar.
 - Cuando agregues uno o varios productos, el resultado de agregar_al_carrito ya trae el carrito completo con precios y subtotal formateado. Usa ESE texto en tu respuesta tal cual (puedes agregar una frase corta antes como "¡Listo! Así va tu pedido:"), NUNCA reescribas la lista de productos tú mismo ni inventes cómo agrupar las cantidades — eso causa errores graves como mostrar productos duplicados o cantidades incorrectas.
+- REGLA CRÍTICA: si el cliente PREGUNTA si tienen algo o qué opciones hay de cierta categoría (ej. "¿manejan el kilo de pastor?", "¿qué tienen de hamburguesas?", "¿tienen quesadillas?") SIN pedirlo todavía, NUNCA respondas de tu conocimiento general de qué es típico en una taquería — eso puede estar desactualizado o ser simplemente incorrecto para ESTE negocio. SIEMPRE usa la herramienta ver_menu (o intenta agregar_al_carrito si parece un pedido directo) para verificar el menú real antes de decir que sí o que no tienen algo. Negar incorrectamente un producto que sí existe es un error grave que pierde ventas reales.
 - Si el cliente pide algo que no está en el menú, indícalo claramente y ofrece alternativas.
 - Cuando el cliente diga que ya terminó de pedir (eso es todo / ya es todo / nada más / con eso / etc.), llama cerrar_pedido.
 - Sé breve, amigable y usa emojis con moderación.
@@ -2056,6 +2150,31 @@ REGLAS IMPORTANTES:
                 # llama), no guardamos el texto improvisado en el
                 # historial — el mensaje real que vera el cliente lo arma
                 # el bloque de cierre determinístico de abajo, no este texto.
+                texto_respuesta = ""
+
+        # ── RED DE SEGURIDAD: el cliente SI dijo que ya es todo, pero el
+        # LLM no llamo cerrar_pedido NI improviso una pregunta reconocible
+        # (la red de arriba solo cubre ese segundo caso) ─────────────────
+        # Bug real visto en produccion: justo despues de una pregunta de
+        # desambiguacion pendiente, el cliente dijo "Es todo" y el LLM
+        # simplemente volvio a mostrar el carrito sin cerrar nada, dejando
+        # el pedido atorado para siempre en fase vacia. Aqui detectamos la
+        # frase de cierre en el TEXTO DEL CLIENTE (no en la respuesta del
+        # bot) y forzamos el cierre de todas formas, sin importar que haya
+        # hecho el LLM en su lugar.
+        if not iniciar_cierre and carrito_estado and not fase:
+            _FRASES_CIERRE_CLIENTE = [
+                "es todo", "ya es todo", "ya seria todo", "ya sería todo",
+                "seria todo", "sería todo", "nada mas", "nada más",
+                "eso es todo", "eso seria todo", "eso sería todo",
+                "con eso es todo", "ya estaria", "ya estaría",
+            ]
+            texto_cliente_norm = texto_low.strip(".,!¡¿? ")
+            _NEGACIONES_CIERRE = ["no es todo", "no, no es todo", "todavia no", "todavía no", "aun no", "aún no", "falta", "me falta"]
+            tiene_negacion = any(n in texto_cliente_norm for n in _NEGACIONES_CIERRE)
+            if not tiene_negacion and any(p in texto_cliente_norm for p in _FRASES_CIERRE_CLIENTE):
+                print(f"   [{nombre_neg}] Cliente dijo frase de cierre clara pero el LLM no llamó cerrar_pedido ni improvisó pregunta reconocible — forzando cierre de todas formas (red de seguridad).")
+                iniciar_cierre = True
                 texto_respuesta = ""
 
         # Guardar carrito actualizado (puede haber cambiado por las tools)
