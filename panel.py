@@ -461,6 +461,10 @@ async def panel_menu_get(phone_id: str, pwd: str = "", msg: str = ""):
 
     aviso = f"<div class='aviso'>✅ Producto agregado.</div>" if msg == "ok" else ""
     aviso_editado = f"<div class='aviso'>✅ Producto actualizado.</div>" if msg == "editado" else ""
+    aviso_duplicado = (
+        f"<div class='error'>⚠️ Ya existe un producto con ese nombre exacto — usa un nombre distinto o edita el que ya existe en vez de crear uno nuevo.</div>"
+        if msg == "duplicado" else ""
+    )
 
     return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
     <meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -473,7 +477,7 @@ async def panel_menu_get(phone_id: str, pwd: str = "", msg: str = ""):
       <a href='/admin/{phone_id}/menu?pwd={pwd}' class='active'>🍽️ Menú</a>
       <a href='/admin/{phone_id}/pedidos?pwd={pwd}'>📦 Pedidos</a>
     </nav>
-    {aviso}{aviso_editado}
+    {aviso}{aviso_editado}{aviso_duplicado}
     <div class='card'>
       <h2>Productos en el menú</h2>
       <p style='color:#94a3b8;font-size:.85rem;margin-top:-8px'>Edita cualquier campo y da clic en "Guardar" en esa fila para aplicar el cambio.</p>
@@ -522,9 +526,10 @@ async def panel_menu_agregar(
     if not negocio or not _auth(negocio, pwd):
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
     from main import _menu_cache
-    db.agregar_item_menu(negocio["id"], nombre, precio, descripcion, categoria)
+    exito = db.agregar_item_menu(negocio["id"], nombre, precio, descripcion, categoria)
     _menu_cache[negocio["id"]] = db.cargar_menu(negocio["id"])
-    return RedirectResponse(f"/admin/{phone_id}/menu?pwd={pwd}&msg=ok", status_code=303)
+    msg = "ok" if exito else "duplicado"
+    return RedirectResponse(f"/admin/{phone_id}/menu?pwd={pwd}&msg={msg}", status_code=303)
 
 
 @router.post("/admin/{phone_id}/menu/editar")
@@ -538,9 +543,10 @@ async def panel_menu_editar(
     if not negocio or not _auth(negocio, pwd):
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
     from main import _menu_cache
-    db.actualizar_item_menu(item_id, nombre, precio, descripcion, categoria, disponible)
+    exito = db.actualizar_item_menu(item_id, nombre, precio, descripcion, categoria, disponible)
     _menu_cache[negocio["id"]] = db.cargar_menu(negocio["id"])
-    return RedirectResponse(f"/admin/{phone_id}/menu?pwd={pwd}&msg=editado", status_code=303)
+    msg = "editado" if exito else "duplicado"
+    return RedirectResponse(f"/admin/{phone_id}/menu?pwd={pwd}&msg={msg}", status_code=303)
 
 
 @router.post("/admin/{phone_id}/menu/eliminar")
