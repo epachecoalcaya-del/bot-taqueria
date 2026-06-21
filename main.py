@@ -279,7 +279,7 @@ def _parsear_salsa_verdura(texto_low: str) -> tuple:
         nombre for clave, nombre in _SALSAS_RECONOCIDAS.items() if clave in texto_low
     })
     sin_salsa = any(p in texto_low for p in ["ninguna salsa", "sin salsa", "ninguna", "sin ninguna"])
-    aparte = any(p in texto_low for p in ["aparte", "separada", "separado", "por separado"])
+    aparte = any(p in texto_low for p in ["aparte", "a parte", "separada", "separado", "por separado"])
     con_todo = any(p in texto_low for p in ["con todo", "todo junto", "normal"])
 
     partes = []
