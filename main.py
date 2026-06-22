@@ -1269,24 +1269,26 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         # ── MODIFICAR CARRITO DURANTE EL CIERRE ─────────────────────────────
         # Si el cliente, estando en una fase de cierre (tipo/nombre/direccion/
         # pago), pide agregar o quitar algo en vez de responder lo que se le
-        # preguntó, lo regresamos al modo de armado (fase "armando") para que
-        # el LLM procese el cambio con sus herramientas. Guardamos en qué fase
-        # estaba para poder recordársela. Cuando termine ("es todo"),
-        # cerrar_pedido retoma el cierre reutilizando tipo/nombre/dirección
-        # que ya tuviéramos. Bug real: cliente en fase 'tipo' dijo "me
-        # quitaste el agua" y el bot solo repetía "¿recoger o envío?".
+        # preguntó, cambiamos la fase a "armando" y DEJAMOS QUE EL LLM PROCESE
+        # ESTE MISMO MENSAJE (no lo descartamos). Esto es clave: el mensaje
+        # "me falta un agua de jamaica de litro" ya trae el producto, así que
+        # el LLM debe agregarlo de una vez. Si tragáramos el mensaje con un
+        # "dime qué quieres ajustar", se perdería el contexto y el cliente
+        # tendría que repetir el producto desde cero (bug real visto en logs:
+        # "De jamaica" llegaba suelto y el LLM mandaba "agua de litro" sin
+        # sabor). Cuando el cliente termine ("es todo" / "recoger"), el cierre
+        # se reanuda reutilizando tipo/nombre/dirección que ya tuviéramos.
         if fase in ("tipo", "nombre", "direccion", "pago") and _quiere_modificar_carrito(texto_low):
-            resp = (
-                "¡Claro! Dime qué quieres ajustar de tu pedido y lo modifico. "
-                "Cuando termines, seguimos donde nos quedamos. 😊"
-            )
-            nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
-            # Conservamos los datos ya capturados (tipo, nombre, direccion)
-            # para que cerrar_pedido los reutilice al retomar el cierre.
-            db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="armando", carrito=carrito)
-            enviar_whatsapp(telefono, resp, token, phone_number_id)
-            print(f"   [{nombre_neg}] Cliente quiere modificar carrito en fase '{fase}' — regresando a modo armado.")
-            return
+            # Persistimos el cambio de fase conservando los datos ya
+            # capturados (tipo, nombre, direccion) para retomar el cierre.
+            db.guardar_sesion(llave, historial, fase_pedido="armando", carrito=carrito,
+                              tipo_entrega=sesion.get("tipo_entrega", ""),
+                              extras_pedido=sesion.get("extras_pedido", []))
+            print(f"   [{nombre_neg}] Cliente quiere modificar carrito en fase '{fase}' — procesando cambio en modo armado.")
+            # Cambiamos la fase local y dejamos que el flujo siga hasta el
+            # LLM (NO retornamos), para que procese el producto de este mensaje.
+            fase = "armando"
+            sesion["fase_pedido"] = "armando"
 
         # FASE: nombre — esperando el nombre del cliente
         if fase == "nombre":
@@ -2499,6 +2501,38 @@ REGLAS IMPORTANTES:
             tipo_entrega_previo = sesion.get("tipo_entrega", "")
             direccion_previa    = sesion.get("direccion_entrega", "")
             nombre_previo       = sesion.get("nombre_cliente", "")
+
+            # Si venimos de modificar (fase 'armando') y el cliente dijo el
+            # tipo de entrega ahi ("recoger"/"a domicilio") pero AUN NO habia
+            # dado su nombre, avanzamos directo a la fase que toca segun ese
+            # tipo, en vez de volver a preguntar "¿recoger o envío?". Bug real:
+            # cliente en fase 'tipo' pidio agregar algo, dijo "Recoger" al
+            # terminar, y el cierre le re-preguntaba el tipo -> su nombre caía
+            # en "no reconocido en fase tipo".
+            if _cerrar_desde_armando and tipo_entrega_previo and not nombre_previo:
+                if tipo_entrega_previo == "recoger":
+                    resp_cierre = (
+                        f"{_formato_carrito(carrito_estado, extras=extras_estado)}\n\n"
+                        "¿A nombre de quién registramos el pedido? 😊"
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp_cierre)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="nombre",
+                                      tipo_entrega="recoger", carrito=carrito_estado, extras_pedido=extras_estado)
+                    enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Cierre desde armado (recoger) — pidiendo nombre.")
+                    return
+                elif tipo_entrega_previo == "envio":
+                    resp_cierre = (
+                        f"{_formato_carrito(carrito_estado, extras=extras_estado)}\n"
+                        "_El costo de envío se calculará según tu dirección._\n\n"
+                        "¿Cuál es tu dirección de entrega? 📍 También puedes compartir tu ubicación con el clip de WhatsApp para mayor precisión."
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp_cierre)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion",
+                                      tipo_entrega="envio", carrito=carrito_estado, extras_pedido=extras_estado)
+                    enviar_whatsapp(telefono, resp_cierre, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Cierre desde armado (envío) — pidiendo dirección.")
+                    return
 
             if tipo_entrega_previo == "recoger" and nombre_previo:
                 # Ya tenemos todo lo necesario para recoger -> resumen directo
