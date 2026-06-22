@@ -1871,6 +1871,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 return
 
             if config_cat["estricta"]:
+                reconocido, nota_cat = _parsear_salsa_verdura(texto_low)
                 ultimo_ai = ""
                 for m in reversed(historial):
                     if isinstance(m, AIMessage):
