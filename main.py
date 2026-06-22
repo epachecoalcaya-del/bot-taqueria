@@ -359,6 +359,55 @@ def _categorias_pendientes_personalizacion(carrito: list, menu: list, notas_pedi
     ]
 
 
+# El Taco Campechano lleva 2 carnes a elegir. Estas son las opciones
+# (las mismas carnes que los tacos normales). Se pregunta UNA VEZ al
+# cerrar, ANTES de la personalizacion de salsa/verdura.
+_CARNES_CAMPECHANO = "pastor, bistec, sirloin o chorizo"
+
+
+def _campechano_pendiente_carnes(carrito: list, notas_pedido: str) -> bool:
+    """True si hay Taco Campechano en el carrito y aun no se ha guardado
+    la nota de cuales carnes lleva (marca 'Campechano carnes:')."""
+    notas_pedido = notas_pedido or ""
+    hay_campechano = any(
+        c.get("nombre") == "Taco Campechano" for c in (carrito or [])
+    )
+    return hay_campechano and "Campechano carnes:" not in notas_pedido
+
+
+# Frases con las que el cliente pide MODIFICAR su carrito en plena fase de
+# cierre (eligiendo recoger/envio, dando nombre, etc.). Si detectamos una
+# de estas, lo regresamos al modo de armado para agregar/quitar y luego
+# retomamos el cierre donde iba. Bug real visto en produccion: cliente en
+# fase 'tipo' dijo "me quitaste el agua" y el bot solo repetia la pregunta.
+_FRASES_MODIFICAR_CARRITO = [
+    "agrega", "agregame", "agrégame", "agregar", "añade", "añademe",
+    "anade", "anademe", "ponme", "pon ", "quita", "quitame", "quítame",
+    "quitale", "quítale", "quitar", "elimina", "borra", "saca",
+    "me falta", "falta", "olvidaste", "se te olvido", "se te olvidó",
+    "me quitaste", "no pediste", "tambien quiero", "también quiero",
+    "agregale", "agrégale", "mejor agrega", "cambia", "cambiame",
+]
+
+
+def _quiere_modificar_carrito(texto_low: str) -> bool:
+    """Heuristica: detecta si el cliente quiere agregar/quitar productos
+    en vez de responder la pregunta de la fase de cierre actual. Usa
+    limites de palabra (word boundaries) para no dar falsos positivos
+    con direcciones que contengan estas letras como subcadena (ej.
+    'Sacalum' contiene 'saca', 'Zacatecas' no debe activar 'saca')."""
+    t = texto_low.strip()
+    for f in _FRASES_MODIFICAR_CARRITO:
+        # \b al inicio y fin para que coincida la palabra completa, no
+        # como parte de otra palabra mas larga.
+        if re.search(rf"\b{re.escape(f)}", t):
+            # Para frases de una sola palabra exigimos limite tambien al
+            # final; para frases con espacio ya es suficientemente especifico.
+            if " " in f or re.search(rf"\b{re.escape(f)}\b", t):
+                return True
+    return False
+
+
 def _formato_carrito(carrito: list, costo_envio: float = 0, extras: list = None) -> str:
     if not carrito:
         return "🛒 Tu carrito está vacío."
@@ -875,7 +924,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         # cualquier producto nuevo) hasta que por casualidad decia una
         # palabra valida de esa fase. Un saludo corto es señal inequivoca
         # de que quiere empezar de nuevo, asi que reiniciamos la sesion.
-        _fase_en_flujo = fase in ("tipo", "nombre", "direccion", "pago") or fase.startswith("personalizacion:")
+        _fase_en_flujo = fase in ("tipo", "nombre", "direccion", "pago", "campechano:carnes") or fase.startswith("personalizacion:")
         if _es_saludo_corto and ((carrito and not fase) or _fase_en_flujo):
             db.limpiar_sesion(llave)
             carrito = []
@@ -915,7 +964,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             except Exception:
                 return True  # si falla el parse, no bloqueamos
 
-        sesion_activa = bool(carrito) or fase in ("confirmando", "nombre", "direccion", "tipo") or fase.startswith("personalizacion:")
+        sesion_activa = bool(carrito) or fase in ("confirmando", "nombre", "direccion", "tipo", "campechano:carnes") or fase.startswith("personalizacion:")
         if not _esta_abierto() and not sesion_activa:
             msg_cerrado = negocio.get("mensaje_cerrado") or (
                 "Lo sentimos, en este momento estamos cerrados. "
@@ -1177,6 +1226,28 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="confirmando", carrito=carrito)
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
                 return
+
+        # ── MODIFICAR CARRITO DURANTE EL CIERRE ─────────────────────────────
+        # Si el cliente, estando en una fase de cierre (tipo/nombre/direccion/
+        # pago), pide agregar o quitar algo en vez de responder lo que se le
+        # preguntó, lo regresamos al modo de armado (fase "armando") para que
+        # el LLM procese el cambio con sus herramientas. Guardamos en qué fase
+        # estaba para poder recordársela. Cuando termine ("es todo"),
+        # cerrar_pedido retoma el cierre reutilizando tipo/nombre/dirección
+        # que ya tuviéramos. Bug real: cliente en fase 'tipo' dijo "me
+        # quitaste el agua" y el bot solo repetía "¿recoger o envío?".
+        if fase in ("tipo", "nombre", "direccion", "pago") and _quiere_modificar_carrito(texto_low):
+            resp = (
+                "¡Claro! Dime qué quieres ajustar de tu pedido y lo modifico. "
+                "Cuando termines, seguimos donde nos quedamos. 😊"
+            )
+            nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+            # Conservamos los datos ya capturados (tipo, nombre, direccion)
+            # para que cerrar_pedido los reutilice al retomar el cierre.
+            db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="armando", carrito=carrito)
+            enviar_whatsapp(telefono, resp, token, phone_number_id)
+            print(f"   [{nombre_neg}] Cliente quiere modificar carrito en fase '{fase}' — regresando a modo armado.")
+            return
 
         # FASE: nombre — esperando el nombre del cliente
         if fase == "nombre":
@@ -1501,6 +1572,58 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
                 print(f"   [{nombre_neg}] Texto muy corto para dirección ('{texto[:30]}'), reiterando pregunta.")
                 return
+
+        # FASE: campechano:carnes — el cliente acaba de decir cuales 2 carnes
+        # quiere en sus campechanos. Guardamos esa nota y seguimos el flujo
+        # normal de cierre: si quedan categorias por personalizar (salsa de
+        # los tacos, etc.) preguntamos eso; si no, pasamos a tipo de entrega.
+        if fase == "campechano:carnes":
+            notas_existentes = sesion.get("notas_pedido", "")
+            nota_nueva = f"Campechano carnes: {texto.strip()}."
+            notas_combinadas = f"{notas_existentes} {nota_nueva}".strip() if notas_existentes else nota_nueva
+
+            # ¿Quedan categorias de personalizacion por preguntar (incluida
+            # la salsa de los propios campechanos, que son categoria Tacos)?
+            pendientes = _categorias_pendientes_personalizacion(carrito, menu, notas_combinadas)
+            if pendientes:
+                siguiente = pendientes[0]
+                resp = f"¡Anotado! Ahora, {_CATEGORIAS_PERSONALIZABLES[siguiente]['pregunta']}"
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido=f"personalizacion:{siguiente}",
+                                  carrito=carrito, notas_pedido=notas_combinadas)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Carnes de campechano capturadas, preguntando {siguiente} a continuación.")
+                return
+
+            # No quedan personalizaciones -> seguir con tipo de entrega.
+            extras_sesion = sesion.get("extras_pedido", [])
+            if tipo_servicio == "recoger":
+                resp = f"{_formato_carrito(carrito, extras=extras_sesion)}\n\n¿Es para recoger en el local?"
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="nombre",
+                                  tipo_entrega="recoger", carrito=carrito, notas_pedido=notas_combinadas)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+            elif tipo_servicio == "envio":
+                resp = (
+                    f"{_formato_carrito(carrito, extras=extras_sesion)}\n"
+                    "_El costo de envío se calculará según tu dirección._\n\n"
+                    "¿Cuál es tu dirección de entrega? 📍 También puedes compartir tu ubicación con el clip de WhatsApp para mayor precisión."
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion",
+                                  carrito=carrito, notas_pedido=notas_combinadas)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+            else:
+                resp = (
+                    f"{_formato_carrito(carrito, extras=extras_sesion)}\n\n"
+                    "¿Es para *recoger en el local* o *envío a domicilio*?"
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo",
+                                  carrito=carrito, notas_pedido=notas_combinadas)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+            print(f"   [{nombre_neg}] Carnes de campechano capturadas, continuando a tipo de entrega.")
+            return
 
         # FASE: personalizacion:<Categoria> — preguntando la personalizacion
         # de UNA categoria especifica del pedido (salsa/verdura para tacos y
@@ -2163,8 +2286,41 @@ REGLAS IMPORTANTES:
                 and tools_llamadas[0] in ("ver_menu", "info_producto", "agregar_al_carrito", "agregar_extra", "ver_carrito")
                 and not iniciar_cierre
             )
+            # Caso de VARIAS tools donde al menos una agregó producto/extra al
+            # carrito (y NO fue bloqueada por anti-duplicado). Aqui NO dejamos
+            # que el LLM redacte la respuesta, porque tiende a (a) inventar que
+            # "hubo un error" si alguna llamada se bloqueó, y (b) mostrar el
+            # carrito incompleto o mal. En su lugar mostramos el carrito REAL
+            # deterministico. Bug real visto en produccion: cliente agregó agua
+            # y el LLM respondió "hubo un error al agregar el agua" mostrando
+            # solo la hamburguesa, confundiendo al cliente y haciendole creer
+            # que su agua no quedó registrada.
+            # IMPORTANTE: solo aplicamos esto si el carrito REALMENTE creció en
+            # este turno (entró algun producto nuevo o subió una cantidad). Si
+            # todas las llamadas pidieron desambiguacion ("¿cuál de estas
+            # opciones?"), el carrito no cambia y debemos mostrar ESAS opciones,
+            # no un carrito que oculta la pregunta.
+            unidades_antes = sum(c.get("cantidad", 0) for c in (carrito or []))
+            unidades_despues = sum(c.get("cantidad", 0) for c in carrito_estado)
+            extras_antes = len(sesion.get("extras_pedido", []) or [])
+            extras_despues = len(extras_estado or [])
+            carrito_crecio = (unidades_despues > unidades_antes) or (extras_despues > extras_antes)
+            hubo_agregado_exitoso = (
+                not iniciar_cierre
+                and not si_respuesta_directa
+                and any(t in ("agregar_al_carrito", "agregar_extra") for t in tools_llamadas)
+                and carrito_crecio
+            )
             if si_respuesta_directa:
                 texto_respuesta = tool_results[0]
+            elif hubo_agregado_exitoso:
+                # Mostramos el carrito real tal como quedó tras procesar todas
+                # las tools del turno (con extras y promos ya aplicadas).
+                texto_respuesta = (
+                    "¡Listo! Así va tu pedido:\n\n"
+                    + _formato_carrito(carrito_estado, extras=extras_estado)
+                    + "\n\n¿Algo más, o ya sería todo? 😊"
+                )
             # Segunda llamada al LLM con los resultados de las herramientas
             elif not iniciar_cierre:
                 from langchain_core.messages import ToolMessage
@@ -2241,6 +2397,21 @@ REGLAS IMPORTANTES:
             # etc.) — una pregunta por categoria presente, nunca por cada
             # producto individual, y se van encadenando si hay varias.
             notas_previas = sesion.get("notas_pedido", "")
+            # PRIMERO: si hay Taco Campechano sin carnes elegidas, preguntamos
+            # cuales 2 carnes lleva, ANTES de la personalizacion de salsa.
+            if _campechano_pendiente_carnes(carrito_estado, notas_previas):
+                resp_camp = (
+                    "Antes de cerrar tu pedido, para tus campechanos 🌮: "
+                    f"¿qué 2 carnes quieres ({_CARNES_CAMPECHANO})? "
+                    "Por ejemplo: pastor y bistec."
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp_camp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="campechano:carnes",
+                                  carrito=carrito_estado, extras_pedido=extras_estado)
+                enviar_whatsapp(telefono, resp_camp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Carrito con campechanos — preguntando carnes antes del cierre.")
+                return
+
             pendientes_iniciales = _categorias_pendientes_personalizacion(carrito_estado, menu, notas_previas)
             if pendientes_iniciales:
                 primera = pendientes_iniciales[0]
