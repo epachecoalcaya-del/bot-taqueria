@@ -1685,6 +1685,85 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             categoria_actual = fase.split(":", 1)[1]
             config_cat = _CATEGORIAS_PERSONALIZABLES.get(categoria_actual, {"estricta": False})
 
+            # GUARDA: si el cliente, en vez de personalizar, responde una
+            # palabra de FASE (recoger, a domicilio, cancelar...) o pide
+            # modificar el carrito, NO la guardamos como nota absurda (bug
+            # real: "Hamburguesas: Recoger"). En su lugar, dejamos la
+            # personalizacion con un valor por defecto ("con todo") y pasamos
+            # ese mensaje al flujo que corresponde. Esto pasa cuando el
+            # cliente se adelanta al flujo.
+            _t_pers = texto_low.strip(".,!¡¿? ")
+            _es_palabra_fase = any(
+                re.search(rf"\b{re.escape(p)}\b", _t_pers)
+                for p in ["recoger", "a domicilio", "domicilio", "para llevar",
+                          "cancelar", "efectivo", "tarjeta", "transferencia"]
+            )
+            if _es_palabra_fase and not _parsear_salsa_verdura(texto_low)[0]:
+                # Guardamos la categoria actual con valor por defecto y
+                # marcamos que el cliente ya dijo algo del cierre, para que
+                # el resto del flujo (mas abajo) lo procese. Avanzamos la
+                # personalizacion sin trabar al cliente.
+                notas_existentes = sesion.get("notas_pedido", "")
+                nota_default = f"{categoria_actual}: con todo."
+                notas_combinadas = f"{notas_existentes} {nota_default}".strip() if notas_existentes else nota_default
+                # Reusamos el resto de categorias pendientes (si las hay).
+                pendientes = _categorias_pendientes_personalizacion(carrito, menu, notas_combinadas)
+                if pendientes:
+                    # Aun quedan categorias: preguntamos la siguiente.
+                    siguiente = pendientes[0]
+                    resp = _CATEGORIAS_PERSONALIZABLES[siguiente]["pregunta"]
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido=f"personalizacion:{siguiente}",
+                                      carrito=carrito, notas_pedido=notas_combinadas)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Cliente se adelantó con palabra de fase; {categoria_actual} con valor default, preguntando {siguiente}.")
+                    return
+                # No quedan mas personalizaciones: procesamos el tipo de
+                # entrega que el cliente adelantó, AQUI mismo, sin caer al
+                # resto del codigo de personalizacion (que volveria a guardar
+                # la nota). Detectamos recoger/envio y avanzamos.
+                _quiere_recoger = any(re.search(rf"\b{re.escape(p)}\b", _t_pers) for p in ["recoger", "para llevar"])
+                _quiere_envio = any(re.search(rf"\b{re.escape(p)}\b", _t_pers) for p in ["a domicilio", "domicilio"])
+                if _quiere_recoger or (tipo_servicio == "recoger"):
+                    resp = (
+                        f"{_formato_carrito(carrito, extras=sesion.get('extras_pedido', []))}\n\n"
+                        "¿A nombre de quién registramos el pedido? 😊"
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="nombre",
+                                      tipo_entrega="recoger", carrito=carrito,
+                                      notas_pedido=notas_combinadas, extras_pedido=sesion.get("extras_pedido", []))
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] {categoria_actual} con default; cliente eligió recoger — pidiendo nombre.")
+                    return
+                elif _quiere_envio or (tipo_servicio == "envio"):
+                    resp = (
+                        f"{_formato_carrito(carrito, extras=sesion.get('extras_pedido', []))}\n"
+                        "_El costo de envío se calculará según tu dirección._\n\n"
+                        "¿Cuál es tu dirección de entrega? 📍 También puedes compartir tu ubicación con el clip de WhatsApp para mayor precisión."
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion",
+                                      tipo_entrega="envio", carrito=carrito,
+                                      notas_pedido=notas_combinadas, extras_pedido=sesion.get("extras_pedido", []))
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] {categoria_actual} con default; cliente eligió envío — pidiendo dirección.")
+                    return
+                else:
+                    # Dijo "cancelar"/"efectivo" u otra palabra: preguntamos
+                    # tipo de entrega normalmente (negocio acepta ambos).
+                    resp = (
+                        f"{_formato_carrito(carrito, extras=sesion.get('extras_pedido', []))}\n\n"
+                        "¿Es para *recoger en el local* o *envío a domicilio*?"
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo",
+                                      carrito=carrito, notas_pedido=notas_combinadas,
+                                      extras_pedido=sesion.get("extras_pedido", []))
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] {categoria_actual} con default; preguntando tipo de entrega.")
+                    return
+
             if config_cat["estricta"]:
                 reconocido, nota_cat = _parsear_salsa_verdura(texto_low)
                 ultimo_ai = ""
