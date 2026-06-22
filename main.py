@@ -359,6 +359,39 @@ def _categorias_pendientes_personalizacion(carrito: list, menu: list, notas_pedi
     ]
 
 
+# Palabras con las que el cliente se refiere EXPLICITAMENTE a una categoria
+# cuando responde una personalizacion. Sirve para detectar respuestas "fuera
+# de turno": el bot pregunta por Hamburguesas y el cliente contesta "roja y
+# con todo LOS TACOS" — esa nota es de Tacos, no de Hamburguesas. Solo se usa
+# para REDIRIGIR cuando la mencion es inequivoca (palabra clara). Usa
+# singular y plural; las comparaciones van con word boundaries.
+_PALABRAS_POR_CATEGORIA = {
+    "Tacos": ["taco", "tacos"],
+    "Volcanes": ["volcan", "volcanes", "volcán", "volcánes"],
+    "Hamburguesas": ["hamburguesa", "hamburguesas", "hambur", "burger"],
+    "Quesadillas": ["quesadilla", "quesadillas", "quesadia", "quesadía"],
+    "Especialidades": ["especial", "especialidad", "especialidades", "gringa", "alambre"],
+    "Tortas": ["torta", "tortas"],
+    "Papas Rellenas": ["papa", "papas", "papa rellena", "papas rellenas"],
+}
+
+
+def _categoria_mencionada_en_texto(texto_low: str, categorias_candidatas) -> str:
+    """Si el texto menciona EXPLICITAMENTE una de las categorias candidatas
+    (por una de sus palabras clave, con limite de palabra), devuelve esa
+    categoria. Si menciona varias o ninguna, devuelve "" (ambiguo: mejor no
+    redirigir). categorias_candidatas debe ser un set/lista de categorias
+    que tienen sentido en el carrito actual."""
+    encontradas = set()
+    for cat in categorias_candidatas:
+        for palabra in _PALABRAS_POR_CATEGORIA.get(cat, []):
+            if re.search(rf"\b{re.escape(palabra)}\b", texto_low):
+                encontradas.add(cat)
+                break
+    # Solo devolvemos si hay UNA sola categoria mencionada sin ambiguedad.
+    return next(iter(encontradas)) if len(encontradas) == 1 else ""
+
+
 # El Taco Campechano lleva 2 carnes a elegir. Estas son las opciones
 # (las mismas carnes que los tacos normales). Se pregunta UNA VEZ al
 # cerrar, ANTES de la personalizacion de salsa/verdura.
@@ -1778,8 +1811,66 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                     print(f"   [{nombre_neg}] {categoria_actual} con default; preguntando tipo de entrega.")
                     return
 
+            # DETECCION DE RESPUESTA "FUERA DE TURNO": el bot pregunta por la
+            # categoria_actual (ej. Hamburguesas) pero el cliente responde
+            # mencionando EXPLICITAMENTE otra categoria presente y pendiente
+            # (ej. "roja y con todo LOS TACOS"). Bug real visto en produccion:
+            # esa nota se guardaba bajo la categoria equivocada. Si la mencion
+            # es inequivoca, guardamos la nota bajo la categoria CORRECTA y
+            # volvemos a preguntar la actual. Solo redirige cuando:
+            #   - el texto menciona UNA sola otra categoria (sin ambiguedad), y
+            #   - esa categoria sigue pendiente (no se le ha preguntado), y
+            #   - NO menciona la categoria_actual (si menciona ambas, es del
+            #     turno actual y lo dejamos pasar normal).
+            _pend_para_redirigir = [
+                c for c in _categorias_pendientes_personalizacion(carrito, menu, sesion.get("notas_pedido", ""))
+                if c != categoria_actual
+            ]
+            _cat_mencionada = _categoria_mencionada_en_texto(texto_low, _pend_para_redirigir)
+            _menciona_actual = bool(_categoria_mencionada_en_texto(texto_low, [categoria_actual]))
+            if _cat_mencionada and not _menciona_actual:
+                # La respuesta es para OTRA categoria. La parseamos segun el
+                # tipo de esa categoria (estricta = salsa/verdura; no estricta
+                # = texto tal cual) y la guardamos bajo la categoria correcta.
+                config_otra = _CATEGORIAS_PERSONALIZABLES.get(_cat_mencionada, {"estricta": False})
+                if config_otra["estricta"]:
+                    _reconocido_otra, _nota_otra = _parsear_salsa_verdura(texto_low)
+                    _texto_nota_otra = _nota_otra if (_reconocido_otra and _nota_otra) else "con todo (sin preferencia de salsa especificada)"
+                else:
+                    _texto_nota_otra = texto.strip()
+                notas_existentes = sesion.get("notas_pedido", "")
+                nota_redirigida = f"{_cat_mencionada}: {_texto_nota_otra}."
+                notas_combinadas = f"{notas_existentes} {nota_redirigida}".strip() if notas_existentes else nota_redirigida
+                # ¿Sigue pendiente la categoria_actual u otra? Re-preguntamos.
+                pendientes = _categorias_pendientes_personalizacion(carrito, menu, notas_combinadas)
+                if pendientes:
+                    siguiente = pendientes[0]
+                    resp = f"¡Anotado lo de {_cat_mencionada.lower()}! Ahora, {_CATEGORIAS_PERSONALIZABLES[siguiente]['pregunta']}"
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido=f"personalizacion:{siguiente}",
+                                      carrito=carrito, notas_pedido=notas_combinadas,
+                                      extras_pedido=sesion.get("extras_pedido", []))
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Respuesta fuera de turno: nota redirigida a {_cat_mencionada}, ahora preguntando {siguiente}.")
+                    return
+                # Ya no quedan categorias pendientes tras redirigir: seguimos
+                # al tipo de entrega (reutilizamos la logica de mas abajo
+                # guardando las notas y dejando que el flujo de cierre siga).
+                db.guardar_sesion(llave, historial, fase_pedido="tipo", carrito=carrito,
+                                  notas_pedido=notas_combinadas, extras_pedido=sesion.get("extras_pedido", []))
+                resp = (
+                    f"{_formato_carrito(carrito, extras=sesion.get('extras_pedido', []))}\n\n"
+                    "¿Es para *recoger en el local* o *envío a domicilio*?"
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo",
+                                  carrito=carrito, notas_pedido=notas_combinadas,
+                                  extras_pedido=sesion.get("extras_pedido", []))
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Respuesta fuera de turno: nota redirigida a {_cat_mencionada}, todas las categorías listas, preguntando tipo.")
+                return
+
             if config_cat["estricta"]:
-                reconocido, nota_cat = _parsear_salsa_verdura(texto_low)
                 ultimo_ai = ""
                 for m in reversed(historial):
                     if isinstance(m, AIMessage):
