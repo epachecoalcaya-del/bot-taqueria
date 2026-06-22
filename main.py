@@ -1227,6 +1227,45 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
                 return
 
+        # ── FASE 'armando': cliente esta modificando tras volver del cierre ──
+        # Si esta en 'armando' (porque pidio modificar durante el cierre) y
+        # dice una frase de cierre ("es todo", "ya", "listo") o directamente
+        # el tipo de entrega ("recoger", "a domicilio"), disparamos el cierre
+        # deterministico en vez de dejar que el LLM lo interprete (lo trataba
+        # raro: usaba "Recoger" para mostrar el carrito en vez de avanzar).
+        # Asi el cierre se reanuda limpio tras la modificacion.
+        _cerrar_desde_armando = False
+        if fase == "armando" and carrito:
+            # Frases de cierre — se comparan como PALABRAS COMPLETAS (word
+            # boundaries) para evitar falsos positivos de subcadenas: "ya"
+            # dentro de "playa"/"desayuno" no debe disparar el cierre.
+            _FRASES_CIERRE_ARMANDO = [
+                "es todo", "eso es todo", "ya es todo", "seria todo", "sería todo",
+                "ya", "listo", "nada mas", "nada más", "asi esta bien",
+                "así está bien", "ya esta", "ya está", "con eso", "es to",
+            ]
+            _t_arm = texto_low.strip(".,!¡¿? ")
+            _es_frase_cierre = any(
+                re.search(rf"\b{re.escape(f)}\b", _t_arm) for f in _FRASES_CIERRE_ARMANDO
+            )
+            _menciona_recoger = any(
+                re.search(rf"\b{re.escape(p)}\b", _t_arm)
+                for p in ["recoger", "paso por", "para llevar", "en el local"]
+            )
+            _menciona_envio = any(
+                re.search(rf"\b{re.escape(p)}\b", _t_arm)
+                for p in ["domicilio", "envio", "envío", "enviar a", "mandar a"]
+            )
+            if (_es_frase_cierre or _menciona_recoger or _menciona_envio) and not _quiere_modificar_carrito(texto_low):
+                tipo_prev = sesion.get("tipo_entrega")
+                if _menciona_recoger:
+                    tipo_prev = "recoger"
+                elif _menciona_envio:
+                    tipo_prev = "envio"
+                if tipo_prev:
+                    sesion["tipo_entrega"] = tipo_prev
+                _cerrar_desde_armando = True
+
         # ── MODIFICAR CARRITO DURANTE EL CIERRE ─────────────────────────────
         # Si el cliente, estando en una fase de cierre (tipo/nombre/direccion/
         # pago), pide agregar o quitar algo en vez de responder lo que se le
@@ -1260,6 +1299,11 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             _NO_ES_NOMBRE_PALABRAS = {
                 "no","si","sí","ok","okay","cancel","cancelar",
                 "modificar","cambiar","espera","otro","otra","nada","ninguno",
+                # Palabras de fase de cierre — un cliente que las escribe
+                # esta respondiendo el flujo, no dando su nombre. Bug real:
+                # "Recoger" se guardo como nombre del cliente (Pedido Recoger).
+                "recoger","envio","envío","domicilio","llevar",
+                "efectivo","tarjeta","transferencia","mercadopago",
             }
             _NO_ES_NOMBRE_FRASES = [
                 "para llevar","para recoger","para envio","para envío",
@@ -2130,14 +2174,23 @@ REGLAS IMPORTANTES:
         ).bind_tools(tools)
 
         msgs_llm = [SystemMessage(content=sistema)] + historial[-MAX_HISTORIAL:] + [HumanMessage(content=texto)]
-        resp_llm = llm.invoke(msgs_llm)
 
-        # Procesar tool calls
-        texto_respuesta = ""
-        tool_results = []
-        iniciar_cierre = False
+        # Si venimos de 'armando' y el cliente ya cerró (dijo "es todo" o el
+        # tipo de entrega), saltamos el LLM por completo y vamos directo al
+        # cierre determinístico — el LLM trataba "Recoger" de forma errática.
+        if _cerrar_desde_armando:
+            texto_respuesta = ""
+            tool_results = []
+            iniciar_cierre = True
+        else:
+            resp_llm = llm.invoke(msgs_llm)
 
-        if resp_llm.tool_calls:
+            # Procesar tool calls
+            texto_respuesta = ""
+            tool_results = []
+            iniciar_cierre = False
+
+        if not _cerrar_desde_armando and resp_llm.tool_calls:
             # Proteccion anti-duplicado INTELIGENTE: el modelo a veces re-agrega
             # un producto que ya estaba en dos escenarios:
             # 1) El cliente da una instruccion tipo "sin cebolla" junto con
@@ -2330,7 +2383,7 @@ REGLAS IMPORTANTES:
                 resp_2 = ChatOpenAI(model="gpt-4o-mini", temperature=0,
                                     api_key=os.getenv("OPENAI_API_KEY")).invoke(msgs_2)
                 texto_respuesta = resp_2.content.strip()
-        else:
+        elif not _cerrar_desde_armando:
             texto_respuesta = resp_llm.content.strip()
 
         # ── RED DE SEGURIDAD: cierre de pedido improvisado sin la tool ──────
@@ -2390,6 +2443,21 @@ REGLAS IMPORTANTES:
         # Si la tool cerrar_pedido devolvio INICIAR_CIERRE, arrancamos el flujo
         # deterministico de cierre (tipo de entrega)
         if iniciar_cierre:
+            # GUARDA: si el carrito quedo vacio (ej. el cliente quito todo
+            # durante una modificacion), NO intentamos cerrar — pedimos que
+            # agregue algo. Bug real: tras quitar el unico producto, el cierre
+            # mostraba "Parece que se ha perdido tu pedido" repetidamente.
+            if not carrito_estado:
+                resp = (
+                    "Tu carrito quedó vacío. 🛒 ¿Qué te gustaría pedir? "
+                    "Dime los productos y los agrego."
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="armando", carrito=[])
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Cierre abortado: carrito vacío — pidiendo productos.")
+                return
+
             # Si el carrito tiene productos de alguna categoria
             # personalizable (tacos, hamburguesas, etc.) que todavia no se
             # le ha preguntado al cliente, lo preguntamos AQUI antes de
