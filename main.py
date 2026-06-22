@@ -846,7 +846,21 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         # dejando el carrito viejo vivo en la sesion sin que el cliente se
         # diera cuenta.
         _PALABRAS_CANCELAR = {"cancelar", "cancela", "cancelar pedido", "anular", "anula"}
-        if texto_low.strip(".,!¡¿? ") in _PALABRAS_CANCELAR or texto_low.startswith("cancelar"):
+        _t_cancel = texto_low.strip(".,!¡¿? ")
+        # Detectamos cancelacion si: (a) el mensaje es exactamente una palabra
+        # de cancelar, o (b) contiene "cancela(r)"/"anula(r)" como palabra
+        # completa junto a "pedido"/"todo"/"orden" o como frase de intencion
+        # ("mejor cancela todo", "quiero cancelar", "cancela mi pedido"). Usa
+        # word boundaries para no disparar con palabras que contengan estas
+        # letras. Bug real: "Mejor cancela todo" en fase nombre se guardaba
+        # como nombre del cliente ("Mejor Cancela Todo") en vez de cancelar.
+        _es_cancelacion = (
+            _t_cancel in _PALABRAS_CANCELAR
+            or texto_low.startswith("cancelar")
+            or bool(re.search(r"\b(cancela|cancelar|anula|anular)\b.*\b(pedido|todo|orden|mi orden)\b", _t_cancel))
+            or bool(re.search(r"\b(mejor|quiero|deseo|favor)\b.*\b(cancela|cancelar|anula|anular)\b", _t_cancel))
+        )
+        if _es_cancelacion:
             pedido_cancelable = db.buscar_pedido_cancelable(negocio_id, telefono)
             if pedido_cancelable:
                 db.actualizar_estado_pedido(pedido_cancelable["id"], "cancelado")
