@@ -636,6 +636,21 @@ def _buscar_coincidencias(texto: str, menu: list) -> list:
         if sin_relleno_match:
             return sin_relleno_match
 
+    # ÚLTIMO RECURSO: búsqueda por palabras clave en CUALQUIER ORDEN.
+    # Cubre casos como "agua de litro de horchata" vs "Agua Horchata 1 Lt":
+    # mismas palabras clave (agua, horchata, 1lt) pero en distinto orden.
+    # Solo se activa si los niveles anteriores no dieron nada. Exige que
+    # TODAS las palabras del texto (sin relleno, >= 3 chars) aparezcan en
+    # el nombre del producto — así 'horchata' no matchea 'Agua Jamaica 1 Lt'.
+    palabras_clave = [p for p in sin_relleno.split() if len(p) >= 3]
+    if palabras_clave:
+        por_palabras = [
+            i for i in menu
+            if all(p in _quitar_relleno(_normalizar_txt(i["nombre"])) for p in palabras_clave)
+        ]
+        if por_palabras:
+            return por_palabras
+
     return [i for i in menu if t in _normalizar_txt(i["nombre"])]
 
 
