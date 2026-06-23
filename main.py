@@ -332,7 +332,7 @@ _CATEGORIAS_PERSONALIZABLES = {
         "estricta": False,
     },
     "Quesadillas": {
-        "pregunta": "para tus quesadillas 🫔: ¿alguna salsa que prefieras (roja, guacamole, piña) o algo que no quieras, como la cebolla?",
+        "pregunta": "para tus quesadillas 🫔: ¿alguna salsa que prefieras (roja o verde), les agrego piña, o hay algo que no quieras como la cebolla?",
         "estricta": False,
     },
     "Especialidades": {
@@ -371,6 +371,28 @@ def _categorias_pendientes_personalizacion(carrito: list, menu: list, notas_pedi
         cat for cat in _CATEGORIAS_PERSONALIZABLES
         if cat in presentes and f"{cat}:" not in notas_pedido
     ]
+
+
+def _actualizar_nota_categoria(notas_existentes: str, categoria: str, nota_nueva: str) -> str:
+    """Actualiza (reemplaza) la nota de una categoria especifica dentro de
+    las notas del pedido. Si ya habia una nota 'Categoria: X', la sustituye
+    por 'Categoria: nota_nueva'. Si no existia, la agrega al final.
+    Esto evita el bug de notas duplicadas/contradictorias cuando el cliente
+    corrige la personalizacion (ej. primero 'roja' luego 'verde'):
+    en vez de acumular 'Tacos: salsa roja. Tacos: salsa verde.' queda
+    solo 'Tacos: salsa verde.'"""
+    notas = notas_existentes or ""
+    prefijo = f"{categoria}:"
+    nota_formateada = f"{categoria}: {nota_nueva}."
+    # Si ya existe la categoria, reemplazamos esa parte
+    if prefijo in notas:
+        # Busca 'Categoria: ....' (hasta el proximo punto seguido de espacio
+        # o fin de cadena) y lo reemplaza. Usa regex para ser preciso.
+        patron = rf"{re.escape(prefijo)}[^.]*\."
+        resultado = re.sub(patron, nota_formateada, notas, count=1)
+        return resultado.strip()
+    # No existia: la agrega al final
+    return f"{notas} {nota_formateada}".strip() if notas else nota_formateada
 
 
 # Palabras con las que el cliente se refiere EXPLICITAMENTE a una categoria
@@ -1868,8 +1890,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 else:
                     _texto_nota_otra = texto.strip()
                 notas_existentes = sesion.get("notas_pedido", "")
-                nota_redirigida = f"{_cat_mencionada}: {_texto_nota_otra}."
-                notas_combinadas = f"{notas_existentes} {nota_redirigida}".strip() if notas_existentes else nota_redirigida
+                notas_combinadas = _actualizar_nota_categoria(notas_existentes, _cat_mencionada, _texto_nota_otra)
                 # ¿Sigue pendiente la categoria_actual u otra? Re-preguntamos.
                 pendientes = _categorias_pendientes_personalizacion(carrito, menu, notas_combinadas)
                 if pendientes:
@@ -1928,8 +1949,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 texto_nota = texto.strip()
 
             notas_existentes = sesion.get("notas_pedido", "")
-            nota_nueva = f"{categoria_actual}: {texto_nota}."
-            notas_combinadas = f"{notas_existentes} {nota_nueva}".strip() if notas_existentes else nota_nueva
+            notas_combinadas = _actualizar_nota_categoria(notas_existentes, categoria_actual, texto_nota)
 
             # ¿Quedan mas categorias del carrito por preguntar?
             pendientes = _categorias_pendientes_personalizacion(carrito, menu, notas_combinadas)
@@ -2415,6 +2435,7 @@ REGLAS IMPORTANTES:
 - REGLA CRÍTICA: si el cliente responde solo "sí", "ok", "va", "dale", "claro" u otra confirmación corta SIN mencionar ningún producto nuevo, NUNCA llames agregar_al_carrito repitiendo el último producto que pidió — eso duplicaría su pedido por error y es un fallo grave. Una confirmación corta sin producto nuevo significa que está de acuerdo con algo que dijiste (el carrito, el precio, etc.), no que quiera repetir la compra. Si no tienes claro a qué se refiere, pregúntale qué más desea agregar.
 - Cuando agregues uno o varios productos, el resultado de agregar_al_carrito ya trae el carrito completo con precios y subtotal formateado. Usa ESE texto en tu respuesta tal cual (puedes agregar una frase corta antes como "¡Listo! Así va tu pedido:"), NUNCA reescribas la lista de productos tú mismo ni inventes cómo agrupar las cantidades — eso causa errores graves como mostrar productos duplicados o cantidades incorrectas.
 - REGLA CRÍTICA: si el cliente PREGUNTA si tienen algo o qué opciones hay de cierta categoría (ej. "¿manejan el kilo de pastor?", "¿qué tienen de hamburguesas?", "¿tienen quesadillas?") SIN pedirlo todavía, NUNCA respondas de tu conocimiento general de qué es típico en una taquería — eso puede estar desactualizado o ser simplemente incorrecto para ESTE negocio. SIEMPRE usa la herramienta ver_menu (o intenta agregar_al_carrito si parece un pedido directo) para verificar el menú real antes de decir que sí o que no tienen algo. Negar incorrectamente un producto que sí existe es un error grave que pierde ventas reales.
+- REGLA CRÍTICA — NUNCA digas "no tenemos X" sin antes verificar con ver_menu: este negocio tiene un menú amplio que incluye: alambres (Alambre, Alambre Pastor, Alambre Sirloin — en Especialidades), tortas (Torta de Pastor, Torta de Bistec, Torta de Chorizo, Torta de Sirloin, Torta Combinada — en Tortas), gringas (Gringa, Juana, Sincronizada — en Quesadillas), volcanes (de Pastor, Bistec, Sirloin, Chorizo, Chorizo Argentino, Campechano), kilos de carne (Kilo de Pastor $400, Kilo de Bistec $450, Kilo de Sirloin $500), hamburguesas, quesadillas, especialidades (Papa Rellena, Que Me Ves, Especial George's, No Que No, Que Chingaos), campechanos, tacos de todas las carnes y bebidas. Si el cliente pregunta por cualquiera de estos y no lo recuerdas del menú, usa ver_menu ANTES de responder — no asumas que no existe. Decirle a un cliente "no tenemos tortas" o "no tenemos alambres" cuando sí los hay es perder la venta y quedar mal.
 - Si el cliente pide algo que no está en el menú, indícalo claramente y ofrece alternativas.
 - Cuando el cliente diga que ya terminó de pedir (eso es todo / ya es todo / nada más / con eso / etc.), llama cerrar_pedido.
 - Sé breve, amigable y usa emojis con moderación.
