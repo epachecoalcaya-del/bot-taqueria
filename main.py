@@ -2060,6 +2060,12 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             que me ves", pasa nombre_producto="que me ves" — NUNCA lo cambies
             por una categoría como "tacos" ni inventes un nombre distinto.
             cantidad: cuantos quiere (default 1).
+            NO LLAMES esta herramienta si el cliente solo está ACLARANDO,
+            REPITIENDO o RE-EXPLICANDO algo que ya pidió (frases como "te
+            pedí X", "en total son X", "ya te dije X", "serían X"), ni si
+            solo PREGUNTA un precio ("¿en cuánto están?"). En esos casos el
+            producto YA está en el carrito o el cliente no quiere agregar
+            nada — volver a agregar descontrola las cantidades.
             IMPORTANTE: si el cliente menciona un producto generico que tiene
             varias variantes en el menu (ej. 'volcán' cuando hay Volcán de
             Pastor/Bistec/Sirloin/Chorizo, o 'agua' cuando hay Agua 1L y ½L),
@@ -2324,6 +2330,16 @@ EJEMPLO CRÍTICO — DIVIDIR UNA CANTIDAD YA PEDIDA EN PREFERENCIAS (NO es agreg
 Cliente: "4 tacos de pastor" → [agregas 4 tacos de pastor]
 Cliente: "2 sin cebolla y 2 con todo" → esto se refiere a CÓMO preparar los 4 tacos QUE YA ESTÁN en el carrito, NO es un pedido de 2+2 tacos nuevos. NO llames agregar_al_carrito. Usa guardar_nota con algo como "2 tacos sin cebolla, 2 con todo" y deja la cantidad del carrito en 4. Agregar 2 tacos más aquí (dejando 6) es un error grave que le cobra de más al cliente.
 Regla general: cuando el cliente describe variaciones o preferencias que SUMAN la cantidad que YA pidió (ej. ya pidió 4 y ahora dice "2 de X y 2 de Y"), es personalización, no producto nuevo.
+
+EJEMPLO CRÍTICO — EL CLIENTE ACLARA, RE-EXPLICA O REPITE UNA CANTIDAD QUE YA PIDIÓ (NO es agregar más):
+Cliente: "Quiero 5 tacos de pastor" → [agregas 5]
+Cliente: "Y 4 de bistec" → [agregas 4 de bistec]
+Cliente: "Pero te pedí 5 de pastor y 4 de bistec" → esto es una ACLARACIÓN de lo que YA pidió, NO un pedido nuevo. El cliente está repitiendo o confirmando lo que ya dijo, posiblemente porque cree que te equivocaste. NO llames agregar_al_carrito otra vez — ya están en el carrito. Solo confirma el estado actual mostrando el carrito (puedes usar ver_carrito si necesitas verlo). Volver a agregar 5+4 aquí (dejando 18) es un error GRAVE que descontrola las cantidades y le cobra de más.
+Otras frases que son ACLARACIÓN (no pedido nuevo): "en total son X", "entonces serían X", "te dije X", "no, eran X", "son X en total", "pedí X". Cuando el cliente usa "te pedí", "te dije", "en total", "serían", o repite cantidades que ya mencionó antes, está corrigiendo tu entendimiento, NO agregando más.
+Si el cliente ACLARA un número distinto al que tienes (ej. tú tienes 5 y dice "no, eran 3"), AJUSTA con quitar_del_carrito o agregar_al_carrito para llegar al número correcto que pide — NO sumes a ciegas. Piensa: "¿cuántos quiere en TOTAL?" y ajusta hasta ese total, no agregues la cantidad que mencionó encima de lo que ya hay.
+
+EJEMPLO CRÍTICO — EL CLIENTE PREGUNTA POR EL PRECIO O EL PEDIDO (NO es agregar nada):
+Cliente: "¿En cuánto están los tacos?" / "¿Cuánto llevo?" / "¿Cuánto es el total?" → esto es una PREGUNTA, NO un pedido. NUNCA llames agregar_al_carrito. Responde la pregunta usando el carrito o el menú, sin modificar nada. Agregar productos cuando el cliente solo pregunta precio es un error grave.
 
 REGLAS IMPORTANTES:
 - Usa SIEMPRE la herramienta agregar_al_carrito para añadir productos. NUNCA inventes precios.
