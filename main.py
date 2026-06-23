@@ -265,19 +265,31 @@ def _calcular_total(carrito: list, extras: list = None) -> float:
     return total_carrito + _calcular_total_extras(extras)
 
 
+# Salsas REALES del negocio (confirmado con el dueño): solo roja y verde.
+# "verde" y "guacamole" son la MISMA salsa (dos nombres para lo mismo).
 _SALSAS_RECONOCIDAS = {
-    "roja": "salsa roja", "guacamole": "salsa guacamole",
-    "piña": "salsa de piña", "pina": "salsa de piña",
+    "roja": "salsa roja",
+    "verde": "salsa verde", "guacamole": "salsa verde",
+}
+
+# La PIÑA NO es salsa, es un complemento incluido (sin costo extra). Se
+# reconoce aparte para anotarla como complemento, no como salsa. Si el
+# cliente dice "verde y piña" quiere salsa verde + piña de complemento.
+_COMPLEMENTOS_RECONOCIDOS = {
+    "piña": "con piña", "pina": "con piña",
 }
 
 
 def _parsear_salsa_verdura(texto_low: str) -> tuple:
-    """Intenta reconocer la eleccion de salsa y con-todo/aparte en la
-    respuesta del cliente. Devuelve (reconocido: bool, nota: str).
-    reconocido=True si se identifico AL MENOS una de las dos partes
-    (no es necesario que conteste ambas para considerarlo valido)."""
+    """Intenta reconocer la eleccion de salsa, complementos y
+    con-todo/aparte en la respuesta del cliente. Devuelve (reconocido:
+    bool, nota: str). reconocido=True si se identifico AL MENOS una de las
+    partes (no es necesario que conteste todo para considerarlo valido)."""
     salsas_elegidas = sorted({
         nombre for clave, nombre in _SALSAS_RECONOCIDAS.items() if clave in texto_low
+    })
+    complementos = sorted({
+        nombre for clave, nombre in _COMPLEMENTOS_RECONOCIDOS.items() if clave in texto_low
     })
     sin_salsa = any(p in texto_low for p in ["ninguna salsa", "sin salsa", "ninguna", "sin ninguna"])
     aparte = any(p in texto_low for p in ["aparte", "a parte", "separada", "separado", "por separado"])
@@ -288,12 +300,14 @@ def _parsear_salsa_verdura(texto_low: str) -> tuple:
         partes.append(", ".join(salsas_elegidas))
     elif sin_salsa:
         partes.append("sin salsa")
+    if complementos:
+        partes.append(", ".join(complementos))
     if aparte:
         partes.append("verdura aparte")
     elif con_todo:
         partes.append("con todo")
 
-    reconocido = bool(salsas_elegidas) or sin_salsa or aparte or con_todo
+    reconocido = bool(salsas_elegidas) or bool(complementos) or sin_salsa or aparte or con_todo
     return reconocido, ", ".join(partes)
 
 
@@ -306,11 +320,11 @@ def _parsear_salsa_verdura(texto_low: str) -> tuple:
 # de tipo "que NO quieres", donde cualquier respuesta es informacion util).
 _CATEGORIAS_PERSONALIZABLES = {
     "Tacos": {
-        "pregunta": "para tus tacos 🌮: ¿qué salsa prefieres (roja, guacamole, piña, o ninguna) y los quieres *con todo* o con la *verdura aparte*?",
+        "pregunta": "para tus tacos 🌮: ¿qué salsa prefieres (roja o verde), los quieres *con todo* o con la *verdura aparte*, y les agrego *piña*?",
         "estricta": True,
     },
     "Volcanes": {
-        "pregunta": "para tus volcanes 🌋: ¿qué salsa prefieres (roja, guacamole, piña, o ninguna) y los quieres *con todo* o con la *verdura aparte*?",
+        "pregunta": "para tus volcanes 🌋: ¿qué salsa prefieres (roja o verde), los quieres *con todo* o con la *verdura aparte*, y les agrego *piña*?",
         "estricta": True,
     },
     "Hamburguesas": {
@@ -2353,6 +2367,12 @@ Cliente: "Y 4 de bistec" → [agregas 4 de bistec]
 Cliente: "Pero te pedí 5 de pastor y 4 de bistec" → esto es una ACLARACIÓN de lo que YA pidió, NO un pedido nuevo. El cliente está repitiendo o confirmando lo que ya dijo, posiblemente porque cree que te equivocaste. NO llames agregar_al_carrito otra vez — ya están en el carrito. Solo confirma el estado actual mostrando el carrito (puedes usar ver_carrito si necesitas verlo). Volver a agregar 5+4 aquí (dejando 18) es un error GRAVE que descontrola las cantidades y le cobra de más.
 Otras frases que son ACLARACIÓN (no pedido nuevo): "en total son X", "entonces serían X", "te dije X", "no, eran X", "son X en total", "pedí X". Cuando el cliente usa "te pedí", "te dije", "en total", "serían", o repite cantidades que ya mencionó antes, está corrigiendo tu entendimiento, NO agregando más.
 Si el cliente ACLARA un número distinto al que tienes (ej. tú tienes 5 y dice "no, eran 3"), AJUSTA con quitar_del_carrito o agregar_al_carrito para llegar al número correcto que pide — NO sumes a ciegas. Piensa: "¿cuántos quiere en TOTAL?" y ajusta hasta ese total, no agregues la cantidad que mencionó encima de lo que ya hay.
+
+EJEMPLO CRÍTICO — EL CLIENTE CAMBIA DE OPINIÓN CON "MEJOR" (REEMPLAZA, no suma):
+Cliente: "Quiero 4 para 8" → [agregas 8 tacos de pastor, quedan 8]
+Cliente: "Bueno mejor 5 para 10" → el cliente CAMBIÓ DE OPINIÓN: ya no quiere 8, ahora quiere 10 EN TOTAL. La palabra "mejor" significa REEMPLAZAR lo anterior, NO sumar. El total final debe ser 10, no 18 ni 16. Para lograrlo: ajusta el carrito al número nuevo. Lo más simple y seguro es quitar TODO lo de ese producto (quitar_del_carrito de los 8) y luego agregar la cantidad nueva (10) — o calcular la diferencia correcta. Piensa siempre en el TOTAL que el cliente quiere ahora (10), no en sumar la diferencia a ciegas.
+Frases que significan REEMPLAZAR (cambio de opinión, dejar el total en el número nuevo): "mejor X", "bueno mejor X", "mejor que sean X", "cámbialo a X", "que sean X mejor", "no, mejor X". En todas, el número nuevo es el TOTAL final de ese producto, NO algo que se suma.
+Ejemplo del error a evitar: tienes 8 tacos, cliente dice "mejor 5 para 10" (quiere 10), y tú quitas solo 2 y agregas 10 dejando 16. ESO ESTÁ MAL y le cobra de más. Debes dejar exactamente 10.
 
 EJEMPLO CRÍTICO — EL CLIENTE PREGUNTA POR EL PRECIO O EL PEDIDO (NO es agregar nada):
 Cliente: "¿En cuánto están los tacos?" / "¿Cuánto llevo?" / "¿Cuánto es el total?" → esto es una PREGUNTA, NO un pedido. NUNCA llames agregar_al_carrito. Responde la pregunta usando el carrito o el menú, sin modificar nada. Agregar productos cuando el cliente solo pregunta precio es un error grave.
