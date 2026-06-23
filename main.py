@@ -2307,6 +2307,18 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                         c["cantidad"] -= cantidad
                         return f"Quité {cantidad}x {nombre_buscado}. Quedan {c['cantidad']}x en tu carrito."
                     carrito_estado.pop(i)
+                    # Limpiar extras huerfanos: si el producto se elimino
+                    # completamente, sus extras asociados ya no tienen
+                    # sentido — quitarlos evita cobrar $15 de más por un
+                    # extra de un producto que ya no esta en el carrito.
+                    extras_antes = len(extras_estado)
+                    extras_estado[:] = [
+                        e for e in extras_estado
+                        if e.get("producto", "").lower() != nombre_buscado.lower()
+                    ]
+                    extras_quitados = extras_antes - len(extras_estado)
+                    if extras_quitados:
+                        return f"Eliminado: {nombre_buscado} del carrito (y {extras_quitados} extra(s) asociado(s))."
                     return f"Eliminado: {nombre_buscado} del carrito."
             return f"No encontré '{nombre_producto}' en tu carrito."
 
@@ -2646,6 +2658,21 @@ REGLAS IMPORTANTES:
                 and any(t in ("agregar_al_carrito", "agregar_extra") for t in tools_llamadas)
                 and carrito_crecio
             )
+            # GUARD ADICIONAL: si el LLM llamó agregar_al_carrito + agregar_extra
+            # juntos (ej. "dame un kilo y una orden de tortillas"), puede que
+            # agregar_extra devuelva error ("no encontré el producto") porque el
+            # kilo se acaba de agregar en el mismo turno y el orden de ejecución
+            # hace que la validación falle. En ese caso, si el carrito SÍ creció
+            # en unidades (el producto principal sí entró), forzamos el carrito
+            # determinístico igualmente — no dejamos que el LLM improvise un
+            # mensaje de "parece que hubo un error" que confunde al cliente.
+            if (not hubo_agregado_exitoso
+                    and not iniciar_cierre
+                    and not si_respuesta_directa
+                    and any(t in ("agregar_al_carrito", "agregar_extra") for t in tools_llamadas)
+                    and unidades_despues > unidades_antes):
+                hubo_agregado_exitoso = True
+                print(f"   [{nombre_neg}] Guard extendido: carrito crecio en unidades aunque extras fallara — mostrando carrito real.")
             if si_respuesta_directa:
                 texto_respuesta = tool_results[0]
             elif hubo_agregado_exitoso:
