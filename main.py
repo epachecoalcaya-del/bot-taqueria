@@ -284,7 +284,10 @@ def _parsear_salsa_verdura(texto_low: str) -> tuple:
     """Intenta reconocer la eleccion de salsa, complementos y
     con-todo/aparte en la respuesta del cliente. Devuelve (reconocido:
     bool, nota: str). reconocido=True si se identifico AL MENOS una de las
-    partes (no es necesario que conteste todo para considerarlo valido)."""
+    partes (no es necesario que conteste todo para considerarlo valido).
+    También reconoce respuestas de ingredientes ('sin jitomate', 'con todo')
+    para que categorías estrictas no pidan reintento cuando el cliente
+    responde solo sobre ingredientes sin mencionar salsa."""
     salsas_elegidas = sorted({
         nombre for clave, nombre in _SALSAS_RECONOCIDAS.items() if clave in texto_low
     })
@@ -293,7 +296,19 @@ def _parsear_salsa_verdura(texto_low: str) -> tuple:
     })
     sin_salsa = any(p in texto_low for p in ["ninguna salsa", "sin salsa", "ninguna", "sin ninguna"])
     aparte = any(p in texto_low for p in ["aparte", "a parte", "separada", "separado", "por separado"])
-    con_todo = any(p in texto_low for p in ["con todo", "todo junto", "normal"])
+    con_todo = any(p in texto_low for p in ["con todo", "todo junto", "normal", "así está bien", "asi esta bien"])
+    # Reconocer respuestas de ingredientes ("sin jitomate", "sin cebolla",
+    # "con queso extra", "extra queso") — validas para hamburguesas, tortas,
+    # especialidades. Cualquier mencion de ingredientes comunes cuenta.
+    _INGREDIENTES_COMUNES = [
+        "jitomate", "cebolla", "mayonesa", "aguacate", "queso", "jamon",
+        "tocino", "pimiento", "champiñones", "champi", "catsup", "mostaza",
+        "cilantro", "tortilla", "orden"
+    ]
+    tiene_ingrediente = bool(
+        re.search(r'\b(sin|con|quita|quitar|extra)\s+\w{3,}', texto_low)
+        or any(ing in texto_low for ing in _INGREDIENTES_COMUNES)
+    )
 
     partes = []
     if salsas_elegidas:
@@ -306,8 +321,12 @@ def _parsear_salsa_verdura(texto_low: str) -> tuple:
         partes.append("verdura aparte")
     elif con_todo:
         partes.append("con todo")
+    # Si solo dijo ingredientes (sin X / con X) sin salsa ni con-todo, usamos
+    # el texto tal cual como nota — el cliente respondio lo que se le pregunto.
+    if tiene_ingrediente and not partes:
+        partes.append(texto_low.strip())
 
-    reconocido = bool(salsas_elegidas) or bool(complementos) or sin_salsa or aparte or con_todo
+    reconocido = bool(salsas_elegidas) or bool(complementos) or sin_salsa or aparte or con_todo or tiene_ingrediente
     return reconocido, ", ".join(partes)
 
 
@@ -328,24 +347,24 @@ _CATEGORIAS_PERSONALIZABLES = {
         "estricta": True,
     },
     "Hamburguesas": {
-        "pregunta": "para tu(s) hamburguesa(s) 🍔: ¿las preparamos con todos los ingredientes, o hay algo que NO quieras (catsup, mostaza, mayonesa, jitomate, aguacate, cebolla, jamón)?",
-        "estricta": False,
+        "pregunta": "para tu(s) hamburguesa(s) 🍔: ¿qué salsa prefieres (roja o verde), y hay algo que NO quieras (catsup, mostaza, mayonesa, jitomate, aguacate, cebolla, jamón)?",
+        "estricta": True,
     },
     "Quesadillas": {
-        "pregunta": "para tus quesadillas 🫔: ¿alguna salsa que prefieras (roja o verde), les agrego piña, o hay algo que no quieras como la cebolla?",
-        "estricta": False,
+        "pregunta": "para tus quesadillas 🫔: ¿qué salsa prefieres (roja o verde), les agrego piña, o hay algo que no quieras como la cebolla?",
+        "estricta": True,
     },
     "Especialidades": {
-        "pregunta": "para tu(s) especialidad(es) 🍽️: ¿con todos los ingredientes, o hay algo que no quieras (cebolla, pimiento, champiñones, tocino o jamón, según el platillo)?",
-        "estricta": False,
+        "pregunta": "para tu(s) especialidad(es) 🍽️: ¿qué salsa prefieres (roja o verde), y hay algo que no quieras (cebolla, pimiento, champiñones, tocino o jamón, según el platillo)?",
+        "estricta": True,
     },
     "Tortas": {
-        "pregunta": "para tu(s) torta(s) 🥖: ¿con todos los ingredientes, o algo que no quieras (mayonesa, jitomate, aguacate, cebolla)?",
-        "estricta": False,
+        "pregunta": "para tu(s) torta(s) 🥖: ¿qué salsa prefieres (roja o verde), y hay algo que no quieras (mayonesa, jitomate, aguacate, cebolla)?",
+        "estricta": True,
     },
     "Papas Rellenas": {
-        "pregunta": "para tu(s) papa(s) rellena(s) 🥔: ¿las quieres con tortillas de maíz o de harina?",
-        "estricta": False,
+        "pregunta": "para tu(s) papa(s) rellena(s) 🥔: ¿las quieres con tortillas de maíz o de harina, y qué salsa prefieres (roja o verde)?",
+        "estricta": True,
     },
 }
 
@@ -2420,6 +2439,7 @@ Cliente: "Quiero 4 para 8" → [agregas 8 tacos de pastor, quedan 8]
 Cliente: "Bueno mejor 5 para 10" → el cliente CAMBIÓ DE OPINIÓN: ya no quiere 8, ahora quiere 10 EN TOTAL. La palabra "mejor" significa REEMPLAZAR lo anterior, NO sumar. El total final debe ser 10, no 18 ni 16. Para lograrlo: ajusta el carrito al número nuevo. Lo más simple y seguro es quitar TODO lo de ese producto (quitar_del_carrito de los 8) y luego agregar la cantidad nueva (10) — o calcular la diferencia correcta. Piensa siempre en el TOTAL que el cliente quiere ahora (10), no en sumar la diferencia a ciegas.
 Frases que significan REEMPLAZAR (cambio de opinión, dejar el total en el número nuevo): "mejor X", "bueno mejor X", "mejor que sean X", "cámbialo a X", "que sean X mejor", "no, mejor X". En todas, el número nuevo es el TOTAL final de ese producto, NO algo que se suma.
 Ejemplo del error a evitar: tienes 8 tacos, cliente dice "mejor 5 para 10" (quiere 10), y tú quitas solo 2 y agregas 10 dejando 16. ESO ESTÁ MAL y le cobra de más. Debes dejar exactamente 10.
+Ejemplo con productos mixtos: tienes 1 torta de pastor + 1 gringa, cliente dice "mejor 2 tortas de pastor". El TOTAL de tortas de pastor debe quedar en 2. El cliente quiere cambiar su pedido a 2 tortas. Si ya tenía 1, debes agregar 1 más (no 2), y decidir qué pasa con la gringa según el contexto — si el cliente no la mencionó, pregunta si la sigue queriendo. NO agregues 2 encima de la 1 que ya había dejando 3.
 
 EJEMPLO CRÍTICO — EL CLIENTE PREGUNTA POR EL PRECIO O EL PEDIDO (NO es agregar nada):
 Cliente: "¿En cuánto están los tacos?" / "¿Cuánto llevo?" / "¿Cuánto es el total?" → esto es una PREGUNTA, NO un pedido. NUNCA llames agregar_al_carrito. Responde la pregunta usando el carrito o el menú, sin modificar nada. Agregar productos cuando el cliente solo pregunta precio es un error grave.
@@ -2442,7 +2462,7 @@ REGLAS IMPORTANTES:
 - Solo llama cerrar_pedido cuando el cliente lo diga EXPLÍCITAMENTE con frases como "es todo", "ya es todo", "nada más", "eso sería todo", "con eso es todo" — un simple "sí" respondiendo a otra pregunta tuya NUNCA cuenta como esto.
 - NUNCA preguntes tú mismo la dirección, ubicación, o tipo de entrega (recoger/envío) de forma libre — eso SIEMPRE debe pasar por cerrar_pedido. Si el cliente menciona "a domicilio" o "envío" de pasada mientras sigue agregando productos, no le preguntes la dirección todavía — sigue tomando su pedido normal hasta que diga explícitamente que ya terminó, y AHÍ llama cerrar_pedido, que se encargará de pedir la dirección correctamente.
 - Las salsas, tipo de cocción, o personalizaciones similares NO son productos independientes del menú — son atributos de un platillo. NUNCA llames agregar_al_carrito para "salsa roja", "salsa verde", etc. Si el cliente elige una salsa para algo que ya está en su carrito, usa guardar_nota para anotarlo (ej. "Que Me Ves con salsa roja"), nunca intentes agregarla como producto nuevo.
-- Si el cliente pide un ingrediente EXTRA con costo adicional (ej. "con extra queso", "agrégale aguacate de más", "doble tocino"), usa la herramienta agregar_extra — NUNCA agregar_al_carrito ni guardar_nota para esto, porque agregar_extra es la única que suma el costo correcto ($15) al total. Si el cliente solo dice cómo quiere el platillo SIN que sea claramente un extra con costo (ej. "sin cebolla", "bien dorado"), eso sigue siendo guardar_nota, no agregar_extra.
+- Si el cliente pide un ingrediente EXTRA con costo adicional (ej. "con extra queso", "agrégale aguacate de más", "doble tocino"), usa la herramienta agregar_extra — NUNCA agregar_al_carrito ni guardar_nota para esto, porque agregar_extra es la única que suma el costo correcto ($15) al total. Si el cliente solo dice cómo quiere el platillo SIN que sea claramente un extra con costo (ej. "sin cebolla", "bien dorado"), eso sigue siendo guardar_nota, no agregar_extra. CASOS TÍPICOS de agregar_extra: "una orden de tortillas de harina" (para un kilo de carne), "extra queso", "doble carne", "más aguacate". Cuando el cliente pide "una orden de X" junto a un producto de kilo, SIEMPRE usa agregar_extra, NO agregar_al_carrito — esas órdenes no existen como productos independientes en el menú.
 - NUNCA inventes ni elijas tú una variante específica (ej. sabor, tamaño) que el cliente no haya mencionado. Si el cliente dice "una agua de litro" sin decir el sabor, pasa nombre_producto="agua de litro" tal cual a agregar_al_carrito — NO adivines ni elijas "Agua Jamaica" o cualquier otro sabor por tu cuenta. La herramienta se encarga de preguntar si hay varias opciones; tu trabajo es pasar las palabras del cliente sin agregarles nada que él no dijo.
 - REGLA CRÍTICA: si el cliente responde solo "sí", "ok", "va", "dale", "claro" u otra confirmación corta SIN mencionar ningún producto nuevo, NUNCA llames agregar_al_carrito repitiendo el último producto que pidió — eso duplicaría su pedido por error y es un fallo grave. Una confirmación corta sin producto nuevo significa que está de acuerdo con algo que dijiste (el carrito, el precio, etc.), no que quiera repetir la compra. Si no tienes claro a qué se refiere, pregúntale qué más desea agregar.
 - Cuando agregues uno o varios productos, el resultado de agregar_al_carrito ya trae el carrito completo con precios y subtotal formateado. Usa ESE texto en tu respuesta tal cual (puedes agregar una frase corta antes como "¡Listo! Así va tu pedido:"), NUNCA reescribas la lista de productos tú mismo ni inventes cómo agrupar las cantidades — eso causa errores graves como mostrar productos duplicados o cantidades incorrectas.
