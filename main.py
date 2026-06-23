@@ -2164,6 +2164,22 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                     if match_cant_previa:
                         cantidad = int(match_cant_previa.group(1))
 
+            # PROMO PASTOR (2x1) — REDONDEO AL PAR (confirmado con el dueño):
+            # el Taco de Pastor es 2x1. La gente lo pide como "2 para 4",
+            # "3 para 6", o simplemente "3 tacos". En todos los casos, por
+            # cada 2 que paga se lleva 2, así que la cantidad ENTREGADA
+            # siempre es par: si pide un número impar, se redondea ARRIBA al
+            # siguiente par (pide 3 -> se le dan 4) y el carrito muestra esa
+            # cantidad real. El precio sale solo con _precio_linea (4 tacos =
+            # 2 paquetes de $26 = $52). No se le avisa al cliente; es un
+            # ajuste callado del beneficio de la promo. (Decisión: se redondea
+            # de forma simple sobre la cantidad de este agregado, sin intentar
+            # reconciliar agregados en varios mensajes, porque casi nadie pide
+            # pastor en partes.) Solo aplica a pastor; las demás carnes cobran
+            # paquetes completos + piezas sueltas a precio individual.
+            if item["nombre"] == "Taco de Pastor" and cantidad % 2 != 0:
+                cantidad += 1
+
             ya_existia = False
             for c in carrito_estado:
                 if c["nombre"] == item["nombre"]:
@@ -2340,6 +2356,13 @@ Si el cliente ACLARA un número distinto al que tienes (ej. tú tienes 5 y dice 
 
 EJEMPLO CRÍTICO — EL CLIENTE PREGUNTA POR EL PRECIO O EL PEDIDO (NO es agregar nada):
 Cliente: "¿En cuánto están los tacos?" / "¿Cuánto llevo?" / "¿Cuánto es el total?" → esto es una PREGUNTA, NO un pedido. NUNCA llames agregar_al_carrito. Responde la pregunta usando el carrito o el menú, sin modificar nada. Agregar productos cuando el cliente solo pregunta precio es un error grave.
+
+EJEMPLO CRÍTICO — FORMATO "X PARA Y" (la gente pide tacos así, MUY común):
+Cliente: "2 para 4" / "dame 2 para 4 de pastor" → el cliente quiere el SEGUNDO número de tacos: 4 tacos. El primer número es cuántos "paga" (por la promo). Llama agregar_al_carrito con cantidad=4 (el segundo número), NO cantidad=2.
+Cliente: "5 para 10" → quiere 10 tacos. cantidad=10.
+Cliente: "3 para 6" → quiere 6 tacos. cantidad=6.
+Regla: en "X para Y", SIEMPRE usa Y (el segundo número, el mayor) como la cantidad. El primer número es solo el precio que el cliente espera pagar; el sistema calcula el cobro solo.
+Si el cliente solo dice un número normal ("dame 3 tacos de pastor"), usa ese número tal cual (cantidad=3) — el sistema se encarga del resto.
 
 REGLAS IMPORTANTES:
 - Usa SIEMPRE la herramienta agregar_al_carrito para añadir productos. NUNCA inventes precios.
