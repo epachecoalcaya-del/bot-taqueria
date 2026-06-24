@@ -1840,20 +1840,10 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             _rec, _nota_salsa = _parsear_salsa_verdura(texto_low)
             notas_existentes = sesion.get("notas_pedido", "")
             extras_sesion = sesion.get("extras_pedido", [])
+            # Recuperar lo que el cliente ya dijo (con todo/aparte/piña)
+            # antes de que supiéramos la salsa — guardado en campo separado.
+            _parcial_previo = sesion.get("salsa_parcial", "")
 
-            # Si habia una respuesta parcial guardada (con todo/aparte sin salsa),
-            # combinarla con la salsa que acaba de llegar.
-            if "SALSA_PARCIAL:" in notas_existentes and _rec:
-                parcial = re.search(r'SALSA_PARCIAL:\s*([^.]+)', notas_existentes)
-                parcial_txt = parcial.group(1).strip() if parcial else ""
-                notas_existentes = re.sub(r'\s*SALSA_PARCIAL:[^.]*\.?\s*', ' ', notas_existentes).strip()
-                if parcial_txt and _nota_salsa:
-                    _nota_salsa = f"{_nota_salsa}, {parcial_txt}"
-                elif parcial_txt:
-                    _nota_salsa = parcial_txt
-
-            # Si el cliente se adelanta con palabra de fase (recoger/domicilio)
-            # guardamos "salsa a gusto" y procesamos la palabra de fase.
             _t_salsa = texto_low.strip(".,!¡¿? ")
             _es_fase_salsa = any(
                 re.search(rf"\b{re.escape(p)}\b", _t_salsa)
@@ -1863,37 +1853,37 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             if _es_fase_salsa:
                 _nota_salsa = "a gusto del cliente"
             elif not _rec:
-                # No se entendio — reintento una vez
-                resp_retry = (
-                    "No quite entendí la salsa. 😊 "
-                    f"{_PREGUNTA_SALSA_GLOBAL}"
-                )
+                # No se entendió nada — reintento completo
+                resp_retry = f"No quite entendí 😊 {_PREGUNTA_SALSA_GLOBAL}"
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp_retry)]
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="personalizacion_salsa",
                                   carrito=carrito, notas_pedido=notas_existentes,
                                   extras_pedido=extras_sesion)
                 enviar_whatsapp(telefono, resp_retry, token, phone_number_id)
                 return
-            elif not any(k in texto_low for k in list(_SALSAS_RECONOCIDAS.keys()) + ["ninguna", "sin salsa"]):
-                # Respondio con todo/aparte/piña pero NO eligio salsa.
-                # Reintento especifico pidiendo solo la salsa.
-                resp_retry = (
-                    f"¡Anotado! Solo dime la salsa: ¿*roja* o *verde*? 🌮"
-                )
-                # Guardamos lo que ya dijo (con todo/aparte) para no perderlo
-                notas_parciales = (
-                    f"{notas_existentes} SALSA_PARCIAL: {_nota_salsa}".strip()
-                    if notas_existentes else f"SALSA_PARCIAL: {_nota_salsa}"
-                )
+            elif not any(k in texto_low for k in list(_SALSAS_RECONOCIDAS.keys()) + ["ninguna", "sin salsa", "ambas", "las dos", "los dos"]):
+                # Respondió con todo/aparte/piña pero SIN elegir salsa.
+                # Guardamos lo que dijo usando el helper que REEMPLAZA
+                # (no acumula) — así cada reintento sobreescribe el anterior.
+                resp_retry = "¡Anotado! Solo dime la salsa: ¿*roja* o *verde*? 🌮"
+                notas_con_parcial = _actualizar_nota_categoria(notas_existentes, "SALSA_PARCIAL", _nota_salsa)
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp_retry)]
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="personalizacion_salsa",
-                                  carrito=carrito, notas_pedido=notas_parciales,
+                                  carrito=carrito, notas_pedido=notas_con_parcial,
                                   extras_pedido=extras_sesion)
                 enviar_whatsapp(telefono, resp_retry, token, phone_number_id)
                 return
 
-            # Guardar la salsa en notas con marca "SALSA:" para saber que ya
-            # se pregunto y no volver a preguntar.
+            # Combinar salsa con lo parcial previo si existe, luego limpiar la marca
+            _parcial_previo = ""
+            if "SALSA_PARCIAL:" in notas_existentes:
+                m = re.search(r'SALSA_PARCIAL:\s*([^.]+)', notas_existentes)
+                _parcial_previo = m.group(1).strip() if m else ""
+                notas_existentes = re.sub(r'\s*SALSA_PARCIAL:[^.]*\.?\s*', ' ', notas_existentes).strip()
+            if _parcial_previo:
+                partes = [p for p in [_nota_salsa, _parcial_previo] if p]
+                _nota_salsa = ", ".join(partes)
+
             nota_salsa_fmt = f"SALSA: {_nota_salsa}"
             notas_combinadas = (
                 f"{notas_existentes} {nota_salsa_fmt}".strip()
