@@ -299,6 +299,11 @@ def _parsear_salsa_verdura(texto_low: str) -> tuple:
     complementos = sorted({
         nombre for clave, nombre in _COMPLEMENTOS_RECONOCIDOS.items() if clave in texto_low
     })
+    # "ambas", "las dos", "los dos" = quiere roja Y verde
+    ambas_salsas = any(p in texto_low for p in ["ambas", "las dos", "los dos", "las 2", "los 2", "ambas salsas", "de las dos"])
+    if ambas_salsas:
+        salsas_elegidas = ["salsa roja", "salsa verde"]
+
     sin_salsa = any(p in texto_low for p in ["ninguna salsa", "sin salsa", "ninguna", "sin ninguna"])
     aparte = any(p in texto_low for p in ["aparte", "a parte", "separada", "separado", "por separado"])
     con_todo = any(p in texto_low for p in ["con todo", "todo junto", "normal", "así está bien", "asi esta bien"])
