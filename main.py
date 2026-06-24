@@ -337,36 +337,43 @@ def _parsear_salsa_verdura(texto_low: str) -> tuple:
 # una vez si no reconoce la respuesta; "estricta": False acepta cualquier
 # respuesta del cliente tal cual como nota, sin reintentar (para preguntas
 # de tipo "que NO quieres", donde cualquier respuesta es informacion util).
+# Configuracion de personalizacion por CATEGORIA del menu. Tras la decisión
+# del dueño: la SALSA y la piña ya NO se preguntan por categoria — se
+# preguntan UNA sola vez al final para todo el pedido (ver fase
+# 'personalizacion_salsa'). Aqui solo quedan las categorias que tienen
+# INGREDIENTES que el cliente puede querer quitar (hamburguesas, tortas,
+# especialidades, quesadillas). Tacos y volcanes NO aparecen aqui porque su
+# unica personalizacion (salsa + con todo/aparte) se maneja en la pregunta
+# global de salsa. "estricta": False acepta cualquier respuesta tal cual.
 _CATEGORIAS_PERSONALIZABLES = {
-    "Tacos": {
-        "pregunta": "para tus tacos 🌮: ¿qué salsa prefieres (roja o verde), los quieres *con todo* o con la *verdura aparte*, y les agrego *piña*?",
-        "estricta": True,
-    },
-    "Volcanes": {
-        "pregunta": "para tus volcanes 🌋: ¿qué salsa prefieres (roja o verde), los quieres *con todo* o con la *verdura aparte*, y les agrego *piña*?",
-        "estricta": True,
-    },
     "Hamburguesas": {
-        "pregunta": "para tu(s) hamburguesa(s) 🍔: ¿qué salsa prefieres (roja o verde), y hay algo que NO quieras (catsup, mostaza, mayonesa, jitomate, aguacate, cebolla, jamón)?",
-        "estricta": True,
+        "pregunta": "para tu(s) hamburguesa(s) 🍔: ¿con todos los ingredientes, o hay algo que NO quieras (catsup, mostaza, mayonesa, jitomate, aguacate, cebolla, jamón)?",
+        "estricta": False,
     },
     "Quesadillas": {
-        "pregunta": "para tus quesadillas 🫔: ¿qué salsa prefieres (roja o verde), les agrego piña, o hay algo que no quieras como la cebolla?",
-        "estricta": True,
+        "pregunta": "para tus quesadillas 🫔: ¿con todo, o hay algo que no quieras como la cebolla?",
+        "estricta": False,
     },
     "Especialidades": {
-        "pregunta": "para tu(s) especialidad(es) 🍽️: ¿qué salsa prefieres (roja o verde), y hay algo que no quieras (cebolla, pimiento, champiñones, tocino o jamón, según el platillo)?",
-        "estricta": True,
+        "pregunta": "para tu(s) especialidad(es) 🍽️: ¿con todos los ingredientes, o hay algo que no quieras (cebolla, pimiento, champiñones, tocino o jamón, según el platillo)?",
+        "estricta": False,
     },
     "Tortas": {
-        "pregunta": "para tu(s) torta(s) 🥖: ¿qué salsa prefieres (roja o verde), y hay algo que no quieras (mayonesa, jitomate, aguacate, cebolla)?",
-        "estricta": True,
+        "pregunta": "para tu(s) torta(s) 🥖: ¿con todos los ingredientes, o algo que no quieras (mayonesa, jitomate, aguacate, cebolla)?",
+        "estricta": False,
     },
     "Papas Rellenas": {
-        "pregunta": "para tu(s) papa(s) rellena(s) 🥔: ¿las quieres con tortillas de maíz o de harina, y qué salsa prefieres (roja o verde)?",
-        "estricta": True,
+        "pregunta": "para tu(s) papa(s) rellena(s) 🥔: ¿las quieres con tortillas de maíz o de harina?",
+        "estricta": False,
     },
 }
+
+# Pregunta GLOBAL de salsa/piña/verdura que se hace UNA vez al final, para
+# todo el pedido, justo antes de preguntar el tipo de entrega.
+_PREGUNTA_SALSA_GLOBAL = (
+    "Para todo tu pedido 🌮: ¿qué salsa prefieres (*roja* o *verde*), "
+    "lo quieres *con todo* o con la *verdura aparte*, y les agrego *piña*?"
+)
 
 
 def _categorias_en_carrito(carrito: list, menu: list) -> set:
@@ -390,6 +397,24 @@ def _categorias_pendientes_personalizacion(carrito: list, menu: list, notas_pedi
         cat for cat in _CATEGORIAS_PERSONALIZABLES
         if cat in presentes and f"{cat}:" not in notas_pedido
     ]
+
+
+# Categorias de productos que NO llevan salsa (no se les pregunta la salsa
+# global). Todo lo demas (tacos, volcanes, tortas, quesadillas, hamburguesas,
+# especialidades, kilos) si lleva salsa segun el dueño. Las bebidas no.
+_CATEGORIAS_SIN_SALSA = {"Bebidas"}
+
+
+def _falta_salsa_global(carrito: list, menu: list, notas_pedido: str) -> bool:
+    """True si el pedido tiene al menos un producto que lleva salsa y aun no
+    se ha hecho la pregunta global de salsa (no existe la marca 'SALSA:' en
+    las notas). La salsa se pregunta UNA vez para todo el pedido, al final."""
+    notas_pedido = notas_pedido or ""
+    if "SALSA:" in notas_pedido:
+        return False  # ya se pregunto
+    presentes = _categorias_en_carrito(carrito, menu)
+    # ¿Hay alguna categoria que SI lleva salsa?
+    return any(cat not in _CATEGORIAS_SIN_SALSA for cat in presentes)
 
 
 def _actualizar_nota_categoria(notas_existentes: str, categoria: str, nota_nueva: str) -> str:
@@ -1041,7 +1066,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         # cualquier producto nuevo) hasta que por casualidad decia una
         # palabra valida de esa fase. Un saludo corto es señal inequivoca
         # de que quiere empezar de nuevo, asi que reiniciamos la sesion.
-        _fase_en_flujo = fase in ("tipo", "nombre", "direccion", "pago", "campechano:carnes") or fase.startswith("personalizacion:")
+        _fase_en_flujo = fase in ("tipo", "nombre", "direccion", "pago", "campechano:carnes", "personalizacion_salsa") or fase.startswith("personalizacion:")
         if _es_saludo_corto and ((carrito and not fase) or _fase_en_flujo):
             db.limpiar_sesion(llave)
             carrito = []
@@ -1081,7 +1106,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             except Exception:
                 return True  # si falla el parse, no bloqueamos
 
-        sesion_activa = bool(carrito) or fase in ("confirmando", "nombre", "direccion", "tipo", "campechano:carnes") or fase.startswith("personalizacion:")
+        sesion_activa = bool(carrito) or fase in ("confirmando", "nombre", "direccion", "tipo", "campechano:carnes", "personalizacion_salsa") or fase.startswith("personalizacion:")
         if not _esta_abierto() and not sesion_activa:
             msg_cerrado = negocio.get("mensaje_cerrado") or (
                 "Lo sentimos, en este momento estamos cerrados. "
@@ -1758,8 +1783,17 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 print(f"   [{nombre_neg}] Carnes de campechano capturadas, preguntando {siguiente} a continuación.")
                 return
 
-            # No quedan personalizaciones -> seguir con tipo de entrega.
+            # No quedan personalizaciones de ingredientes -> salsa global o tipo de entrega.
             extras_sesion = sesion.get("extras_pedido", [])
+            if _falta_salsa_global(carrito, menu, notas_combinadas):
+                resp = f"¡Anotado! Ahora, {_PREGUNTA_SALSA_GLOBAL}"
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="personalizacion_salsa",
+                                  carrito=carrito, notas_pedido=notas_combinadas,
+                                  extras_pedido=extras_sesion)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] Carnes de campechano capturadas — preguntando salsa global.")
+                return
             if tipo_servicio == "recoger":
                 resp = f"{_formato_carrito(carrito, extras=extras_sesion)}\n\n¿Es para recoger en el local?"
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
@@ -1788,16 +1822,88 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             print(f"   [{nombre_neg}] Carnes de campechano capturadas, continuando a tipo de entrega.")
             return
 
+        # FASE: personalizacion_salsa — pregunta GLOBAL de salsa/piña/verdura
+        # para TODO el pedido (una sola vez, al final de las personalizaciones
+        # de ingredientes por categoria). El cliente responde algo como
+        # "roja", "verde y piña", "roja con todo", etc.
+        if fase == "personalizacion_salsa":
+            _rec, _nota_salsa = _parsear_salsa_verdura(texto_low)
+            notas_existentes = sesion.get("notas_pedido", "")
+            extras_sesion = sesion.get("extras_pedido", [])
+
+            # Si el cliente se adelanta con palabra de fase (recoger/domicilio)
+            # guardamos "salsa a gusto" y procesamos la palabra de fase.
+            _t_salsa = texto_low.strip(".,!¡¿? ")
+            _es_fase_salsa = any(
+                re.search(rf"\b{re.escape(p)}\b", _t_salsa)
+                for p in ["recoger", "a domicilio", "domicilio", "para llevar",
+                          "envio", "envío", "cancelar", "cancela"]
+            )
+            if _es_fase_salsa:
+                _nota_salsa = "a gusto del cliente"
+            elif not _rec:
+                # No se entendio — reintento una vez
+                resp_retry = (
+                    "No quite entendí la salsa. 😊 "
+                    f"{_PREGUNTA_SALSA_GLOBAL}"
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp_retry)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="personalizacion_salsa",
+                                  carrito=carrito, notas_pedido=notas_existentes,
+                                  extras_pedido=extras_sesion)
+                enviar_whatsapp(telefono, resp_retry, token, phone_number_id)
+                return
+
+            # Guardar la salsa en notas con marca "SALSA:" para saber que ya
+            # se pregunto y no volver a preguntar.
+            nota_salsa_fmt = f"SALSA: {_nota_salsa}"
+            notas_combinadas = (
+                f"{notas_existentes} {nota_salsa_fmt}".strip()
+                if notas_existentes else nota_salsa_fmt
+            )
+            print(f"   [{nombre_neg}] Salsa global capturada: '{_nota_salsa}' — continuando a tipo de entrega.")
+
+            # Si se adelanto con palabra de fase, procesarla aqui
+            if _es_fase_salsa:
+                if any(p in _t_salsa for p in ["recoger", "para llevar"]):
+                    resp = f"{_formato_carrito(carrito, extras=extras_sesion)}\n\n¿A nombre de quién registramos el pedido? 😊"
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="nombre",
+                                      tipo_entrega="recoger", carrito=carrito,
+                                      notas_pedido=notas_combinadas, extras_pedido=extras_sesion)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    return
+                elif any(p in _t_salsa for p in ["domicilio", "envio", "envío"]):
+                    resp = (
+                        "¿Cuál es tu dirección de entrega? 📍 También puedes compartir "
+                        "tu ubicación con el clip de WhatsApp para mayor precisión."
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="direccion",
+                                      carrito=carrito, notas_pedido=notas_combinadas,
+                                      extras_pedido=extras_sesion)
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    return
+
+            # Flujo normal: ir a tipo de entrega
+            resp = (
+                f"{_formato_carrito(carrito, extras=extras_sesion)}\n\n"
+                "¿Es para *recoger en el local* o *envío a domicilio*?"
+            )
+            nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+            db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="tipo",
+                              carrito=carrito, notas_pedido=notas_combinadas,
+                              extras_pedido=extras_sesion)
+            enviar_whatsapp(telefono, resp, token, phone_number_id)
+            return
+
         # FASE: personalizacion:<Categoria> — preguntando la personalizacion
-        # de UNA categoria especifica del pedido (salsa/verdura para tacos y
-        # volcanes; ingredientes a quitar para hamburguesas, quesadillas,
-        # especialidades, tortas; tipo de tortilla para papas rellenas). Se
-        # pregunta UNA SOLA VEZ por cada categoria presente en el carrito
-        # (nunca por producto individual), encadenando a la siguiente
-        # categoria pendiente si hay mas de una en el pedido. Solo las
-        # categorias "estrictas" (con keywords reconocibles, ver
-        # _CATEGORIAS_PERSONALIZABLES) reintentan una vez si no se entiende
-        # la respuesta; las demas aceptan cualquier respuesta tal cual.
+        # de UNA categoria especifica del pedido (ingredientes a quitar para
+        # hamburguesas, quesadillas, especialidades, tortas; tipo de tortilla
+        # para papas rellenas). Se pregunta UNA SOLA VEZ por cada categoria
+        # presente en el carrito (nunca por producto individual), encadenando
+        # a la siguiente categoria pendiente si hay mas de una en el pedido.
+        # Despues de todas las categorias viene la pregunta de salsa global.
         if fase.startswith("personalizacion:"):
             categoria_actual = fase.split(":", 1)[1]
             config_cat = _CATEGORIAS_PERSONALIZABLES.get(categoria_actual, {"estricta": False})
@@ -1922,9 +2028,17 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                     enviar_whatsapp(telefono, resp, token, phone_number_id)
                     print(f"   [{nombre_neg}] Respuesta fuera de turno: nota redirigida a {_cat_mencionada}, ahora preguntando {siguiente}.")
                     return
-                # Ya no quedan categorias pendientes tras redirigir: seguimos
-                # al tipo de entrega (reutilizamos la logica de mas abajo
-                # guardando las notas y dejando que el flujo de cierre siga).
+                # Ya no quedan categorias pendientes tras redirigir.
+                # Antes de tipo de entrega: preguntar SALSA GLOBAL si falta.
+                if _falta_salsa_global(carrito, menu, notas_combinadas):
+                    resp = f"¡Anotado lo de {_cat_mencionada.lower()}! Ahora, {_PREGUNTA_SALSA_GLOBAL}"
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="personalizacion_salsa",
+                                      carrito=carrito, notas_pedido=notas_combinadas,
+                                      extras_pedido=sesion.get("extras_pedido", []))
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Respuesta fuera de turno: nota redirigida a {_cat_mencionada} — preguntando salsa global.")
+                    return
                 db.guardar_sesion(llave, historial, fase_pedido="tipo", carrito=carrito,
                                   notas_pedido=notas_combinadas, extras_pedido=sesion.get("extras_pedido", []))
                 resp = (
@@ -1982,8 +2096,18 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 print(f"   [{nombre_neg}] {categoria_actual} personalizado, preguntando {siguiente} a continuación.")
                 return
 
-            # Ya no quedan categorias pendientes -> seguir con tipo de entrega.
+            # Ya no quedan categorias de ingredientes pendientes.
+            # Antes de tipo de entrega: preguntar SALSA GLOBAL si falta.
             extras_sesion = sesion.get("extras_pedido", [])
+            if _falta_salsa_global(carrito, menu, notas_combinadas):
+                resp = f"¡Anotado! Ahora, {_PREGUNTA_SALSA_GLOBAL}"
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="personalizacion_salsa",
+                                  carrito=carrito, notas_pedido=notas_combinadas,
+                                  extras_pedido=extras_sesion)
+                enviar_whatsapp(telefono, resp, token, phone_number_id)
+                print(f"   [{nombre_neg}] {categoria_actual} personalizado — preguntando salsa global.")
+                return
             if tipo_servicio == "recoger":
                 resp = f"{_formato_carrito(carrito, extras=extras_sesion)}\n\n¿Es para recoger en el local?"
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
@@ -2818,6 +2942,18 @@ REGLAS IMPORTANTES:
                                   carrito=carrito_estado, extras_pedido=extras_estado)
                 enviar_whatsapp(telefono, resp_pers, token, phone_number_id)
                 print(f"   [{nombre_neg}] Carrito con categorías personalizables ({', '.join(pendientes_iniciales)}) — preguntando '{primera}' antes de continuar el cierre.")
+                return
+
+            # No quedan categorias de ingredientes — preguntar SALSA GLOBAL
+            # (una sola pregunta para todo el pedido) antes de tipo de entrega.
+            if _falta_salsa_global(carrito_estado, menu, notas_previas):
+                resp_salsa = f"Antes de cerrar, {_PREGUNTA_SALSA_GLOBAL}"
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp_salsa)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="personalizacion_salsa",
+                                  carrito=carrito_estado, extras_pedido=extras_estado,
+                                  notas_pedido=notas_previas)
+                enviar_whatsapp(telefono, resp_salsa, token, phone_number_id)
+                print(f"   [{nombre_neg}] Categorías listas — preguntando salsa global.")
                 return
 
             # Si el cliente ya habia llegado a definir tipo_entrega antes
