@@ -244,14 +244,19 @@ def _extraer_pago_de_notas(notas_raw: str) -> tuple:
     campo de notas, si existe. Devuelve (metodo_pago, notas_limpias).
     Esta es la UNICA funcion que debe usarse para esto — antes habia
     lugares que hacian este parseo a mano y otros que se les olvidaba,
-    lo que causaba que '[PAGO:Tarjeta]' se mostrara crudo al cliente."""
-    if not notas_raw or not notas_raw.startswith("[PAGO:"):
-        return "", notas_raw
-    cierre = notas_raw.find("]")
+    lo que causaba que '[PAGO:Tarjeta]' se mostrara crudo al cliente.
+    También limpia la marca interna 'SALSA: X' convirtiéndola en texto
+    legible para la cocina ('Salsa: X') sin el prefijo en mayúsculas."""
+    notas = notas_raw or ""
+    # Limpiar marca SALSA: -> texto legible para cocina
+    notas = re.sub(r'\bSALSA:\s*', 'Salsa: ', notas)
+    if not notas or not notas.startswith("[PAGO:"):
+        return "", notas.strip()
+    cierre = notas.find("]")
     if cierre == -1:
-        return "", notas_raw
-    metodo = notas_raw[6:cierre]
-    notas_limpias = notas_raw[cierre + 1:].strip()
+        return "", notas.strip()
+    metodo = notas[6:cierre]
+    notas_limpias = notas[cierre + 1:].strip()
     return metodo, notas_limpias
 
 
@@ -1831,6 +1836,17 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             notas_existentes = sesion.get("notas_pedido", "")
             extras_sesion = sesion.get("extras_pedido", [])
 
+            # Si habia una respuesta parcial guardada (con todo/aparte sin salsa),
+            # combinarla con la salsa que acaba de llegar.
+            if "SALSA_PARCIAL:" in notas_existentes and _rec:
+                parcial = re.search(r'SALSA_PARCIAL:\s*([^.]+)', notas_existentes)
+                parcial_txt = parcial.group(1).strip() if parcial else ""
+                notas_existentes = re.sub(r'\s*SALSA_PARCIAL:[^.]*\.?\s*', ' ', notas_existentes).strip()
+                if parcial_txt and _nota_salsa:
+                    _nota_salsa = f"{_nota_salsa}, {parcial_txt}"
+                elif parcial_txt:
+                    _nota_salsa = parcial_txt
+
             # Si el cliente se adelanta con palabra de fase (recoger/domicilio)
             # guardamos "salsa a gusto" y procesamos la palabra de fase.
             _t_salsa = texto_low.strip(".,!¡¿? ")
@@ -1850,6 +1866,23 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp_retry)]
                 db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="personalizacion_salsa",
                                   carrito=carrito, notas_pedido=notas_existentes,
+                                  extras_pedido=extras_sesion)
+                enviar_whatsapp(telefono, resp_retry, token, phone_number_id)
+                return
+            elif not any(k in texto_low for k in list(_SALSAS_RECONOCIDAS.keys()) + ["ninguna", "sin salsa"]):
+                # Respondio con todo/aparte/piña pero NO eligio salsa.
+                # Reintento especifico pidiendo solo la salsa.
+                resp_retry = (
+                    f"¡Anotado! Solo dime la salsa: ¿*roja* o *verde*? 🌮"
+                )
+                # Guardamos lo que ya dijo (con todo/aparte) para no perderlo
+                notas_parciales = (
+                    f"{notas_existentes} SALSA_PARCIAL: {_nota_salsa}".strip()
+                    if notas_existentes else f"SALSA_PARCIAL: {_nota_salsa}"
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp_retry)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido="personalizacion_salsa",
+                                  carrito=carrito, notas_pedido=notas_parciales,
                                   extras_pedido=extras_sesion)
                 enviar_whatsapp(telefono, resp_retry, token, phone_number_id)
                 return
