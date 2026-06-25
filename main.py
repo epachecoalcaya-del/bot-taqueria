@@ -2600,7 +2600,8 @@ EJEMPLO CRÍTICO — FORMATO "X PARA Y" (la gente pide tacos así, MUY común):
 Cliente: "2 para 4" / "dame 2 para 4 de pastor" → el cliente quiere el SEGUNDO número de tacos: 4 tacos. El primer número es cuántos "paga" (por la promo). Llama agregar_al_carrito con cantidad=4 (el segundo número), NO cantidad=2.
 Cliente: "5 para 10" → quiere 10 tacos. cantidad=10.
 Cliente: "3 para 6" → quiere 6 tacos. cantidad=6.
-Regla: en "X para Y", SIEMPRE usa Y (el segundo número, el mayor) como la cantidad. El primer número es solo el precio que el cliente espera pagar; el sistema calcula el cobro solo.
+Cliente: "2 juanas y 4 para 8" → quiere 2 Juanas Y 8 Tacos de Pastor. El "4 para 8" SIEMPRE es la promo de pastor, aunque en el mismo mensaje haya otros productos. NUNCA interpretes "X para Y" como cantidad de otro producto (gringas, quesadillas, volcanes, etc.) — es exclusivo de la promo de pastor.
+Regla: en "X para Y", SIEMPRE usa Y (el segundo número, el mayor) como la cantidad DE TACOS DE PASTOR. El primer número es solo el precio que el cliente espera pagar; el sistema calcula el cobro solo.
 Si el cliente solo dice un número normal ("dame 3 tacos de pastor"), usa ese número tal cual (cantidad=3) — el sistema se encarga del resto.
 
 REGLAS IMPORTANTES:
