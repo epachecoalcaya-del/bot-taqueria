@@ -485,15 +485,24 @@ def _categoria_mencionada_en_texto(texto_low: str, categorias_candidatas) -> str
 # El Taco Campechano lleva 2 carnes a elegir. Estas son las opciones
 # (las mismas carnes que los tacos normales). Se pregunta UNA VEZ al
 # cerrar, ANTES de la personalizacion de salsa/verdura.
-_CARNES_CAMPECHANO = "pastor, bistec, sirloin o chorizo"
+_CARNES_CAMPECHANO = "pastor, bistec, sirloin, chorizo o chorizo argentino"
+
+# Todos los productos del menú que son campechanos (2 carnes a elegir).
+# Cuando hay cualquiera de estos en el carrito, se pregunta las 2 carnes.
+_NOMBRES_CAMPECHANO = {
+    "Taco Campechano",
+    "Volcán Campechano",
+    "Quesadilla Campechana",
+}
 
 
 def _campechano_pendiente_carnes(carrito: list, notas_pedido: str) -> bool:
-    """True si hay Taco Campechano en el carrito y aun no se ha guardado
-    la nota de cuales carnes lleva (marca 'Campechano carnes:')."""
+    """True si hay algún producto campechano en el carrito (Taco, Volcán o
+    Quesadilla Campechana) y aún no se ha guardado la nota de cuáles 2
+    carnes lleva (marca 'Campechano carnes:')."""
     notas_pedido = notas_pedido or ""
     hay_campechano = any(
-        c.get("nombre") == "Taco Campechano" for c in (carrito or [])
+        c.get("nombre") in _NOMBRES_CAMPECHANO for c in (carrito or [])
     )
     return hay_campechano and "Campechano carnes:" not in notas_pedido
 
@@ -2615,12 +2624,14 @@ REGLAS IMPORTANTES:
 - Solo llama cerrar_pedido cuando el cliente lo diga EXPLÍCITAMENTE con frases como "es todo", "ya es todo", "nada más", "eso sería todo", "con eso es todo" — un simple "sí" respondiendo a otra pregunta tuya NUNCA cuenta como esto.
 - NUNCA preguntes tú mismo la dirección, ubicación, o tipo de entrega (recoger/envío) de forma libre — eso SIEMPRE debe pasar por cerrar_pedido. Si el cliente menciona "a domicilio" o "envío" de pasada mientras sigue agregando productos, no le preguntes la dirección todavía — sigue tomando su pedido normal hasta que diga explícitamente que ya terminó, y AHÍ llama cerrar_pedido, que se encargará de pedir la dirección correctamente.
 - Las salsas, tipo de cocción, o personalizaciones similares NO son productos independientes del menú — son atributos de un platillo. NUNCA llames agregar_al_carrito para "salsa roja", "salsa verde", etc. Si el cliente elige una salsa para algo que ya está en su carrito, usa guardar_nota para anotarlo (ej. "Que Me Ves con salsa roja"), nunca intentes agregarla como producto nuevo.
-- Si el cliente pide un ingrediente EXTRA con costo adicional (ej. "con extra queso", "agrégale aguacate de más", "doble tocino"), usa la herramienta agregar_extra — NUNCA agregar_al_carrito ni guardar_nota para esto, porque agregar_extra es la única que suma el costo correcto ($15) al total. Si el cliente solo dice cómo quiere el platillo SIN que sea claramente un extra con costo (ej. "sin cebolla", "bien dorado"), eso sigue siendo guardar_nota, no agregar_extra. CASOS TÍPICOS de agregar_extra: "una orden de tortillas de harina" (para un kilo de carne), "extra queso", "doble carne", "más aguacate". Cuando el cliente pide "una orden de X" junto a un producto de kilo, SIEMPRE usa agregar_extra, NO agregar_al_carrito — esas órdenes no existen como productos independientes en el menú.
+- REGLA CRÍTICA — DESPUÉS DE CONFIRMAR UN PEDIDO: cuando el cliente acaba de confirmar un pedido (ves "✅ ¡Pedido confirmado!" en el historial) y luego dice que quiere agregar algo, pedir algo más, o hacer otro pedido, el carrito YA ESTÁ VACÍO y DEBES usar agregar_al_carrito para iniciar un nuevo pedido desde cero. NUNCA uses agregar_extra después de que el pedido fue confirmado — el carrito está limpio y no hay productos a los que agregarle extras. Ejemplo: cliente confirmó volcanes, luego dice "agrega tacos campechanos" → usa agregar_al_carrito('taco campechano'), no agregar_extra.
+- Si el cliente ya tiene tacos en el carrito y dice "una orden de bistec" / "una de bistec" / "también de bistec", interpreta que quiere un taco de bistec — no desambigues mostrando todas las opciones de bistec (hamburguesa, torta, volcán, etc.). El contexto de tacos aplica cuando el carrito ya tiene tacos o el cliente está en un flujo de tacos. — NUNCA agregar_al_carrito ni guardar_nota para esto, porque agregar_extra es la única que suma el costo correcto ($15) al total. Si el cliente solo dice cómo quiere el platillo SIN que sea claramente un extra con costo (ej. "sin cebolla", "bien dorado"), eso sigue siendo guardar_nota, no agregar_extra. CASOS TÍPICOS de agregar_extra: "una orden de tortillas de harina" (para un kilo de carne), "extra queso", "doble carne", "más aguacate". Cuando el cliente pide "una orden de X" junto a un producto de kilo, SIEMPRE usa agregar_extra, NO agregar_al_carrito — esas órdenes no existen como productos independientes en el menú.
 - NUNCA inventes ni elijas tú una variante específica (ej. sabor, tamaño) que el cliente no haya mencionado. Si el cliente dice "una agua de litro" sin decir el sabor, pasa nombre_producto="agua de litro" tal cual a agregar_al_carrito — NO adivines ni elijas "Agua Jamaica" o cualquier otro sabor por tu cuenta. La herramienta se encarga de preguntar si hay varias opciones; tu trabajo es pasar las palabras del cliente sin agregarles nada que él no dijo.
 - REGLA CRÍTICA: si el cliente responde solo "sí", "ok", "va", "dale", "claro" u otra confirmación corta SIN mencionar ningún producto nuevo, NUNCA llames agregar_al_carrito repitiendo el último producto que pidió — eso duplicaría su pedido por error y es un fallo grave. Una confirmación corta sin producto nuevo significa que está de acuerdo con algo que dijiste (el carrito, el precio, etc.), no que quiera repetir la compra. Si no tienes claro a qué se refiere, pregúntale qué más desea agregar.
 - Cuando agregues uno o varios productos, el resultado de agregar_al_carrito ya trae el carrito completo con precios y subtotal formateado. Usa ESE texto en tu respuesta tal cual (puedes agregar una frase corta antes como "¡Listo! Así va tu pedido:"), NUNCA reescribas la lista de productos tú mismo ni inventes cómo agrupar las cantidades — eso causa errores graves como mostrar productos duplicados o cantidades incorrectas.
 - REGLA CRÍTICA: si el cliente PREGUNTA si tienen algo o qué opciones hay de cierta categoría (ej. "¿manejan el kilo de pastor?", "¿qué tienen de hamburguesas?", "¿tienen quesadillas?") SIN pedirlo todavía, NUNCA respondas de tu conocimiento general de qué es típico en una taquería — eso puede estar desactualizado o ser simplemente incorrecto para ESTE negocio. SIEMPRE usa la herramienta ver_menu (o intenta agregar_al_carrito si parece un pedido directo) para verificar el menú real antes de decir que sí o que no tienen algo. Negar incorrectamente un producto que sí existe es un error grave que pierde ventas reales.
 - REGLA CRÍTICA — NUNCA digas "no tenemos X" sin antes verificar con ver_menu: este negocio tiene un menú amplio que incluye: alambres (Alambre, Alambre Pastor, Alambre Sirloin — en Especialidades), tortas (Torta de Pastor, Torta de Bistec, Torta de Chorizo, Torta de Sirloin, Torta Combinada — en Tortas), gringas (Gringa, Juana, Sincronizada — en Quesadillas), volcanes (de Pastor, Bistec, Sirloin, Chorizo, Chorizo Argentino, Campechano), kilos de carne (Kilo de Pastor $400, Kilo de Bistec $450, Kilo de Sirloin $500), hamburguesas, quesadillas, especialidades (Papa Rellena, Que Me Ves, Especial George's, No Que No, Que Chingaos), campechanos, tacos de todas las carnes y bebidas. Si el cliente pregunta por cualquiera de estos y no lo recuerdas del menú, usa ver_menu ANTES de responder — no asumas que no existe. Decirle a un cliente "no tenemos tortas" o "no tenemos alambres" cuando sí los hay es perder la venta y quedar mal.
+- REGLA IMPORTANTE — PRODUCTOS CAMPECHANOS (2 carnes a elegir): cuando el cliente pide cualquier producto campechano del menú (Taco Campechano, Volcán Campechano o Quesadilla Campechana), estos productos siempre llevan 2 carnes a elegir de: pastor, bistec, sirloin, chorizo o chorizo argentino. Si el cliente no especifica las carnes al pedirlo, agrégalo al carrito normalmente y el sistema le preguntará las carnes automáticamente al cerrar. NO asumas las carnes ni preguntes antes de tiempo — solo agrega el producto al carrito y deja que el flujo de cierre haga la pregunta. si el cliente pide una combinación o platillo que no está en el menú pero usa ingredientes reales del negocio (ej. "sirloin con queso", "taco de sirloin con aguacate extra", "quesadilla de pastor"), NO respondas con la lista larga de todos los productos. En cambio, SUGIERE el platillo más parecido que SÍ existe: "No manejamos 'sirloin con queso' como platillo, pero tenemos la *Quesadilla Sirloin* ($65) que lleva tortilla de harina, queso oaxaca y sirloin. ¿Te gustaría esa o prefieres ver el menú completo? 😊". Identifica qué ingredientes pidió, busca el platillo más cercano del menú y sugiérelo de forma amable.
 - Si el cliente pide algo que no está en el menú, indícalo claramente y ofrece alternativas.
 - Cuando el cliente diga que ya terminó de pedir (eso es todo / ya es todo / nada más / con eso / etc.), llama cerrar_pedido.
 - Sé breve, amigable y usa emojis con moderación.
@@ -2947,12 +2958,17 @@ REGLAS IMPORTANTES:
             # etc.) — una pregunta por categoria presente, nunca por cada
             # producto individual, y se van encadenando si hay varias.
             notas_previas = sesion.get("notas_pedido", "")
-            # PRIMERO: si hay Taco Campechano sin carnes elegidas, preguntamos
-            # cuales 2 carnes lleva, ANTES de la personalizacion de salsa.
+            # PRIMERO: si hay productos campechanos sin carnes elegidas,
+            # preguntamos cuales 2 carnes llevan, ANTES de la personalizacion.
             if _campechano_pendiente_carnes(carrito_estado, notas_previas):
+                camps_en_carrito = sorted({
+                    c.get("nombre") for c in carrito_estado
+                    if c.get("nombre") in _NOMBRES_CAMPECHANO
+                })
+                tipo_camp = " y ".join(camps_en_carrito) if camps_en_carrito else "campechano(s)"
                 resp_camp = (
-                    "Antes de cerrar tu pedido, para tus campechanos 🌮: "
-                    f"¿qué 2 carnes quieres ({_CARNES_CAMPECHANO})? "
+                    f"Antes de cerrar tu pedido, para tu(s) *{tipo_camp}* 🌮: "
+                    f"¿qué 2 carnes quieres? Las opciones son: *{_CARNES_CAMPECHANO}*. "
                     "Por ejemplo: pastor y bistec."
                 )
                 nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp_camp)]
