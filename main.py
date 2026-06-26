@@ -1453,7 +1453,14 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
 
         # FASE: nombre — esperando el nombre del cliente
         if fase == "nombre":
-            nombre_cl = texto.strip().title()
+            # Limpiar prefijos conversacionales que no son parte del nombre
+            # Ej: "ok Mario" -> "Mario", "oye soy Ana" -> "Ana"
+            _texto_limpio = texto.strip()
+            for _prefijo in ["ok ", "okay ", "oye ", "oye, ", "soy ", "me llamo ", "mi nombre es "]:
+                if _texto_limpio.lower().startswith(_prefijo):
+                    _texto_limpio = _texto_limpio[len(_prefijo):]
+                    break
+            nombre_cl = _texto_limpio.strip().title()
             # Frases y palabras que NO son nombres. "vale" es ambiguo
             # (significa "ok" pero tambien es apodo de Valentina/Valeria),
             # asi que lo tratamos aparte: solo lo rechazamos si el cliente
