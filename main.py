@@ -1086,7 +1086,12 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         # palabra valida de esa fase. Un saludo corto es señal inequivoca
         # de que quiere empezar de nuevo, asi que reiniciamos la sesion.
         _fase_en_flujo = fase in ("tipo", "nombre", "direccion", "pago", "campechano:carnes", "personalizacion_salsa") or fase.startswith("personalizacion:")
-        if _es_saludo_corto and ((carrito and not fase) or _fase_en_flujo):
+        # Reset si:
+        # - Carrito huerfano (productos sin fase activa)
+        # - Carrito con productos en cualquier fase + saludo nuevo (cliente vuelve a empezar)
+        # - Sesion atorada en flujo de cierre
+        _tiene_carrito = bool(carrito)
+        if _es_saludo_corto and (_tiene_carrito or _fase_en_flujo):
             db.limpiar_sesion(llave)
             carrito = []
             fase    = ""
