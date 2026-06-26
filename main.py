@@ -1858,6 +1858,19 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         # de ingredientes por categoria). El cliente responde algo como
         # "roja", "verde y piña", "roja con todo", etc.
         if fase == "personalizacion_salsa":
+            # Guard de idempotencia: si la salsa ya fue capturada en esta sesion
+            # (marca SALSA: en notas), ignoramos mensajes duplicados de Meta.
+            _notas_actuales = sesion.get("notas_pedido", "")
+            if "SALSA:" in _notas_actuales and not "SALSA_PARCIAL:" in _notas_actuales:
+                # Salsa ya procesada — re-enviamos el carrito a tipo de entrega
+                # sin volver a tocar nada.
+                _extras_curr = sesion.get("extras_pedido", [])
+                resp_dup = (
+                    f"{_formato_carrito(carrito, extras=_extras_curr)}\n\n"
+                    "¿Es para *recoger en el local* o *envío a domicilio*?"
+                )
+                enviar_whatsapp(telefono, resp_dup, token, phone_number_id)
+                return
             _rec, _nota_salsa = _parsear_salsa_verdura(texto_low)
             notas_existentes = sesion.get("notas_pedido", "")
             extras_sesion = sesion.get("extras_pedido", [])
