@@ -3125,19 +3125,20 @@ REGLAS IMPORTANTES:
         # en este turno NO se llamo quitar_del_carrito ni se cancelo, es un
         # error: el LLM o algun reproceso "olvido" productos. Restauramos los
         # que falten para que el cliente no pierda lo que ya habia pedido.
+        # NOTA: tools_llamadas puede no existir si el flujo fue determinístico
+        # (saludos, fases de cierre, etc.) — usamos getattr para evitar crash.
+        _tools_llamadas_guard = tools_llamadas if 'tools_llamadas' in dir() else []
         if carrito_snapshot and not iniciar_cierre:
-            hubo_quitar = any(t in ("quitar_del_carrito", "vaciar_carrito") for t in tools_llamadas)
+            hubo_quitar = any(t in ("quitar_del_carrito", "vaciar_carrito") for t in _tools_llamadas_guard)
             if not hubo_quitar:
                 nombres_ahora = {c["nombre"].lower() for c in carrito_estado}
                 restaurados = []
                 for prod_orig in carrito_snapshot:
                     nom = prod_orig["nombre"].lower()
                     if nom not in nombres_ahora:
-                        # Producto desaparecido sin quitar explicito: restaurar
                         carrito_estado.append(dict(prod_orig))
                         restaurados.append(prod_orig["nombre"])
                     else:
-                        # Existe, pero verificar que no haya bajado la cantidad
                         for c in carrito_estado:
                             if c["nombre"].lower() == nom and c["cantidad"] < prod_orig["cantidad"]:
                                 c["cantidad"] = prod_orig["cantidad"]
@@ -3145,15 +3146,25 @@ REGLAS IMPORTANTES:
                                 break
                 if restaurados:
                     print(f"   [{nombre_neg}] GUARD INTEGRIDAD: restaurados productos perdidos sin quitar explicito: {restaurados}")
-                    # Si el guard ya habia armado una respuesta de carrito,
-                    # la regeneramos con el carrito corregido.
                     if texto_respuesta and "Tu pedido" in texto_respuesta:
-                        _pend = [r for r in tool_results if isinstance(r, str) and "varias opciones" in r] if 'tool_results' in dir() else []
                         texto_respuesta = (
                             "¡Listo! Así va tu pedido:\n\n"
                             + _formato_carrito(carrito_estado, extras=extras_estado)
                             + "\n\n¿Algo más, o ya sería todo? 😊"
                         )
+
+        # Si hubo productos no encontrados en este turno (tool devolvió aviso
+        # de "no encontré"), y también hubo productos que sí entraron al carrito,
+        # adjuntamos el aviso al final para que el cliente no pierda la info.
+        # Bug real: "1 orden de sueldo" se ignoraba silenciosamente mientras
+        # el carrito solo mostraba los productos que sí entraron.
+        _tool_results_guard = tool_results if 'tool_results' in dir() else []
+        avisos_no_encontrado = [
+            r for r in _tool_results_guard
+            if isinstance(r, str) and "No encontré" in r
+        ]
+        if avisos_no_encontrado and texto_respuesta and "Tu pedido" in texto_respuesta:
+            texto_respuesta += "\n\n" + "\n\n".join(avisos_no_encontrado)
 
         # Guardar carrito actualizado (puede haber cambiado por las tools)
         nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=texto_respuesta or "")]
