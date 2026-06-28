@@ -2383,6 +2383,29 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 cantidad = int(match_cantidad.group(1))
                 nombre_producto = match_cantidad.group(2)
 
+            # NORMALIZACIÓN: "orden de [carne]" = paquete de tacos con promo.
+            # Ej: "orden de sirloin" → "taco de sirloin" con cantidad=2 (promo 2x$50)
+            #     "orden de bistec" → "taco de bistec" con cantidad=3 (promo 3x$60)
+            # Excepción: "orden de tortillas" y "orden de cebolla asada" son
+            # extras para kilos — esos NO se tocan aquí.
+            _ORDENES_CARNES = {
+                "pastor":            ("taco de pastor",            2),
+                "bistec":            ("taco de bistec",            3),
+                "sirloin":           ("taco de sirloin",           2),
+                "chorizo argentino": ("taco de chorizo argentino", 2),
+                "chorizo":           ("taco de chorizo",           3),
+                "campechano":        ("taco campechano",           3),
+            }
+            _nom_low = nombre_producto.strip().lower()
+            _EXCL_ORDEN = ("tortillas", "cebolla", "cebolla asada")
+            if ("orden de " in _nom_low or _nom_low.startswith("orden ")) and not any(e in _nom_low for e in _EXCL_ORDEN):
+                _carne_raw = re.sub(r'^(una?\s+)?orden\s+de\s+', '', _nom_low).strip()
+                if _carne_raw in _ORDENES_CARNES and cantidad == 1:
+                    _nombre_real, _cant_promo = _ORDENES_CARNES[_carne_raw]
+                    print(f"   [{nombre_neg}] 'orden de {_carne_raw}' → {_cant_promo}x {_nombre_real} (paquete promo)")
+                    nombre_producto = _nombre_real
+                    cantidad = _cant_promo
+
             # Cantidad 0 o negativa: el cliente dijo algo como "0 tacos" o
             # "quita" mal interpretado — no agregamos nada y pedimos que
             # aclare, en vez de convertir el 0 a 1 silenciosamente (bug
@@ -2692,7 +2715,8 @@ REGLAS IMPORTANTES:
 - NUNCA preguntes tú mismo la dirección, ubicación, o tipo de entrega (recoger/envío) de forma libre — eso SIEMPRE debe pasar por cerrar_pedido. Si el cliente menciona "a domicilio" o "envío" de pasada mientras sigue agregando productos, no le preguntes la dirección todavía — sigue tomando su pedido normal hasta que diga explícitamente que ya terminó, y AHÍ llama cerrar_pedido, que se encargará de pedir la dirección correctamente.
 - Las salsas, tipo de cocción, o personalizaciones similares NO son productos independientes del menú — son atributos de un platillo. NUNCA llames agregar_al_carrito para "salsa roja", "salsa verde", etc. Si el cliente elige una salsa para algo que ya está en su carrito, usa guardar_nota para anotarlo (ej. "Que Me Ves con salsa roja"), nunca intentes agregarla como producto nuevo.
 - REGLA CRÍTICA — DESPUÉS DE CONFIRMAR UN PEDIDO: cuando el cliente acaba de confirmar un pedido (ves "✅ ¡Pedido confirmado!" en el historial) y luego dice que quiere agregar algo, pedir algo más, o hacer otro pedido, el carrito YA ESTÁ VACÍO y DEBES usar agregar_al_carrito para iniciar un nuevo pedido desde cero. NUNCA uses agregar_extra después de que el pedido fue confirmado — el carrito está limpio y no hay productos a los que agregarle extras. Ejemplo: cliente confirmó volcanes, luego dice "agrega tacos campechanos" → usa agregar_al_carrito('taco campechano'), no agregar_extra.
-- Si el cliente ya tiene tacos en el carrito y dice "una orden de bistec" / "una de bistec" / "también de bistec", interpreta que quiere un taco de bistec — no desambigues mostrando todas las opciones de bistec (hamburguesa, torta, volcán, etc.). El contexto de tacos aplica cuando el carrito ya tiene tacos o el cliente está en un flujo de tacos. — NUNCA agregar_al_carrito ni guardar_nota para esto, porque agregar_extra es la única que suma el costo correcto ($15) al total. Si el cliente solo dice cómo quiere el platillo SIN que sea claramente un extra con costo (ej. "sin cebolla", "bien dorado"), eso sigue siendo guardar_nota, no agregar_extra. CASOS TÍPICOS de agregar_extra: "una orden de tortillas de harina" (para un kilo de carne), "extra queso", "doble carne", "más aguacate". Cuando el cliente pide "una orden de X" junto a un producto de kilo, SIEMPRE usa agregar_extra, NO agregar_al_carrito — esas órdenes no existen como productos independientes en el menú.
+- REGLA CRÍTICA — "ORDEN DE [CARNE]": cuando el cliente dice "una orden de bistec", "orden de sirloin", "orden de pastor", "una de sirloin", etc., siempre significa el PAQUETE de tacos de esa carne con su promo. Ejemplos: "orden de bistec" = 3 Tacos de Bistec por $60 (promo 3x$60); "orden de sirloin" = 2 Tacos de Sirloin por $50 (promo 2x$50); "orden de pastor" = 2 Tacos de Pastor (2x1); "orden de chorizo" = 3 Tacos de Chorizo por $60. NUNCA interpretes "orden de [carne]" como agregar_extra a otro platillo — SIEMPRE es agregar_al_carrito con la cantidad del paquete correspondiente. La ÚNICA excepción es "orden de tortillas" u "orden de cebolla asada" que sí son extras para kilos de carne.
+- Si el cliente ya tiene tacos en el carrito y dice "una orden de bistec" / "una de bistec" / "también de bistec", interpreta que quiere un taco de bistec — no desambigues mostrando todas las opciones de bistec (hamburguesa, torta, volcán, etc.). El contexto de tacos aplica cuando el carrito ya tiene tacos o el cliente está en un flujo de tacos. — NUNCA agregar_al_carrito ni guardar_nota para esto, porque agregar_extra es la única que suma el costo correcto ($15) al total. Si el cliente solo dice cómo quiere el platillo SIN que sea claramente un extra con costo (ej. "sin cebolla", "bien dorado"), eso sigue siendo guardar_nota, no agregar_extra. CASOS TÍPICOS de agregar_extra: "una orden de tortillas de harina" (para un kilo de carne), "extra queso", "doble carne", "más aguacate". Cuando el cliente pide "una orden de tortillas" o "una orden de cebolla" junto a un producto de kilo, SIEMPRE usa agregar_extra, NO agregar_al_carrito — esas órdenes no existen como productos independientes en el menú.
 - NUNCA inventes ni elijas tú una variante específica (ej. sabor, tamaño) que el cliente no haya mencionado. Si el cliente dice "una agua de litro" sin decir el sabor, pasa nombre_producto="agua de litro" tal cual a agregar_al_carrito — NO adivines ni elijas "Agua Jamaica" o cualquier otro sabor por tu cuenta. La herramienta se encarga de preguntar si hay varias opciones; tu trabajo es pasar las palabras del cliente sin agregarles nada que él no dijo.
 - REGLA CRÍTICA: si el cliente responde solo "sí", "ok", "va", "dale", "claro" u otra confirmación corta SIN mencionar ningún producto nuevo, NUNCA llames agregar_al_carrito repitiendo el último producto que pidió — eso duplicaría su pedido por error y es un fallo grave. Una confirmación corta sin producto nuevo significa que está de acuerdo con algo que dijiste (el carrito, el precio, etc.), no que quiera repetir la compra. Si no tienes claro a qué se refiere, pregúntale qué más desea agregar.
 - Cuando agregues uno o varios productos, el resultado de agregar_al_carrito ya trae el carrito completo con precios y subtotal formateado. Usa ESE texto en tu respuesta tal cual (puedes agregar una frase corta antes como "¡Listo! Así va tu pedido:"), NUNCA reescribas la lista de productos tú mismo ni inventes cómo agrupar las cantidades — eso causa errores graves como mostrar productos duplicados o cantidades incorrectas.
