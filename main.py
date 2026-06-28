@@ -2323,6 +2323,19 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         # tacos + especial, agrego bebidas, y los 10 tacos desaparecieron.
         carrito_snapshot = [dict(c) for c in carrito]
 
+        # Mapa de "orden de [carne]" → (nombre_real, cantidad_paquete).
+        # Definido aquí para ser accesible tanto en agregar_al_carrito como
+        # en el guard de re-agregado (_es_reagregado).
+        _ORDENES_CARNES = {
+            "pastor":            ("Taco de Pastor",            2),
+            "bistec":            ("Taco de Bistec",            3),
+            "sirloin":           ("Taco de Sirloin",           2),
+            "chorizo argentino": ("Taco de Chorizo Argentino", 2),
+            "chorizo":           ("Taco de Chorizo",           3),
+            "campechano":        ("Taco Campechano",           3),
+        }
+        _EXCL_ORDEN = ("tortillas", "cebolla", "cebolla asada")
+
         @tool
         def ver_menu() -> str:
             """Muestra el menu completo con precios al cliente."""
@@ -2388,16 +2401,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             #     "orden de bistec" → "taco de bistec" con cantidad=3 (promo 3x$60)
             # Excepción: "orden de tortillas" y "orden de cebolla asada" son
             # extras para kilos — esos NO se tocan aquí.
-            _ORDENES_CARNES = {
-                "pastor":            ("taco de pastor",            2),
-                "bistec":            ("taco de bistec",            3),
-                "sirloin":           ("taco de sirloin",           2),
-                "chorizo argentino": ("taco de chorizo argentino", 2),
-                "chorizo":           ("taco de chorizo",           3),
-                "campechano":        ("taco campechano",           3),
-            }
             _nom_low = nombre_producto.strip().lower()
-            _EXCL_ORDEN = ("tortillas", "cebolla", "cebolla asada")
             if ("orden de " in _nom_low or _nom_low.startswith("orden ")) and not any(e in _nom_low for e in _EXCL_ORDEN):
                 _carne_raw = re.sub(r'^(una?\s+)?orden\s+de\s+', '', _nom_low).strip()
                 if _carne_raw in _ORDENES_CARNES and cantidad == 1:
@@ -2784,11 +2788,22 @@ REGLAS IMPORTANTES:
             )
 
             def _es_reagregado(args: dict) -> bool:
-                item = _buscar_en_menu(args.get("nombre_producto", ""), menu)
+                nom_arg = args.get("nombre_producto", "")
+                cant_arg = max(1, args.get("cantidad", 1))
+                # Normalizar "orden de [carne]" igual que en agregar_al_carrito
+                # para que el guard pueda encontrar el producto real en el menú
+                # Y use la cantidad correcta del paquete (no el 1 del LLM).
+                _nom_low_g = nom_arg.strip().lower()
+                _EXCL_G = ("tortillas", "cebolla", "cebolla asada")
+                if ("orden de " in _nom_low_g or _nom_low_g.startswith("orden ")) and not any(e in _nom_low_g for e in _EXCL_G):
+                    _carne_g = re.sub(r'^(una?\s+)?orden\s+de\s+', '', _nom_low_g).strip()
+                    if _carne_g in _ORDENES_CARNES:
+                        nom_arg, cant_arg = _ORDENES_CARNES[_carne_g]
+                item = _buscar_en_menu(nom_arg, menu)
                 if not item:
                     return False
                 nombre = item["nombre"]
-                cant = max(1, args.get("cantidad", 1))
+                cant = cant_arg  # ya normalizado (incluye cantidad del paquete si fue "orden de")
                 # Ya estaba en el carrito con la misma cantidad...
                 if carrito_previo.get(nombre) != cant:
                     return False
@@ -2809,12 +2824,19 @@ REGLAS IMPORTANTES:
                 #    de bistec" donde el modelo re-agrega "Hamburguesa de
                 #    Pastor" (ya en el carrito) sin que el cliente la haya
                 #    mencionado en absoluto en este turno — un bug real
-                #    visto en producción que duplicó hamburguesas.
+                #    visto en producción que duplicó hamburguesas. También
+                #    detecta el caso del turno de corrección: cliente dice
+                #    "5 para 10" (solo pastor), el LLM re-agrega sirloin que
+                #    ya estaba aunque el cliente no lo mencionó en ESTE mensaje.
                 palabras_nombre = [
                     p for p in _normalizar_txt(nombre).split()
                     if p not in _PALABRAS_RELLENO and len(p) > 2
                 ]
-                if palabras_nombre and not all(p in texto_low for p in palabras_nombre):
+                # Verificamos contra el texto ACTUAL del cliente (texto_low),
+                # no contra el historial completo — así "sirloin" que aparece
+                # en un mensaje anterior no "justifica" re-agregarlo ahora.
+                texto_actual = texto_low
+                if palabras_nombre and not all(p in texto_actual for p in palabras_nombre):
                     return True
                 return False
 
