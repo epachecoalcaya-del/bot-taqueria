@@ -1895,7 +1895,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                                   extras_pedido=extras_sesion)
                 enviar_whatsapp(telefono, resp_retry, token, phone_number_id)
                 return
-            elif not any(k in texto_low for k in list(_SALSAS_RECONOCIDAS.keys()) + ["ninguna", "sin salsa", "ambas", "las dos", "los dos"]):
+            elif not any(k in texto_low for k in list(_SALSAS_RECONOCIDAS.keys()) + ["ninguna", "sin salsa", "ambas", "las dos", "los dos", "las 2", "los 2", "2 salsas", "dos salsas"]):
                 # Respondió con todo/aparte/piña pero SIN elegir salsa.
                 # Guardamos lo que dijo usando el helper que REEMPLAZA
                 # (no acumula) — así cada reintento sobreescribe el anterior.
@@ -1915,8 +1915,16 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 _parcial_previo = m.group(1).strip() if m else ""
                 notas_existentes = re.sub(r'\s*SALSA_PARCIAL:[^.]*\.?\s*', ' ', notas_existentes).strip()
             if _parcial_previo:
-                partes = [p for p in [_nota_salsa, _parcial_previo] if p]
-                _nota_salsa = ", ".join(partes)
+                # Combinar sin duplicar: separar en componentes, deduplicar
+                # preservando orden. Evita "salsa roja, salsa verde, salsa
+                # roja, salsa verde" cuando ambos mensajes traian salsa.
+                _componentes = []
+                for fragmento in [_nota_salsa, _parcial_previo]:
+                    for parte in fragmento.split(","):
+                        parte = parte.strip()
+                        if parte and parte not in _componentes:
+                            _componentes.append(parte)
+                _nota_salsa = ", ".join(_componentes)
 
             nota_salsa_fmt = f"SALSA: {_nota_salsa}"
             notas_combinadas = (
@@ -2138,10 +2146,38 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
 
                 texto_nota = nota_cat if (reconocido and nota_cat) else "con todo (sin preferencia de salsa especificada)"
             else:
-                # No estricta: aceptamos la respuesta del cliente tal cual,
-                # sin necesidad de reconocer palabras clave especificas —
-                # cualquier cosa que diga es informacion util para cocina.
-                texto_nota = texto.strip()
+                # No estricta: aceptamos la respuesta del cliente tal cual.
+                # PERO: si el cliente hizo una PREGUNTA (ej. "¿qué formas de
+                # pago tienes?") en vez de personalizar, NO la guardamos como
+                # nota de cocina (bug pedido #60: la nota decia "Especialidades:
+                # Qué formas de pago tienes"). La detectamos y reiteramos la
+                # pregunta de personalizacion sin trabar el flujo.
+                _t_strip = texto.strip()
+                _es_pregunta = (
+                    "?" in _t_strip or "¿" in _t_strip
+                    or any(_t_strip.lower().startswith(p) for p in [
+                        "que ", "qué ", "cual ", "cuál ", "cuanto ", "cuánto ",
+                        "como ", "cómo ", "tienen ", "hay ", "puedo ", "aceptan ",
+                        "donde ", "dónde ", "cuando ", "cuándo "])
+                )
+                if _es_pregunta:
+                    # Responder preguntas comunes brevemente y volver a preguntar
+                    # la personalizacion. Para "formas de pago" damos la info.
+                    _resp_pregunta = ""
+                    if any(k in _t_strip.lower() for k in ["forma de pago", "formas de pago", "como pago", "cómo pago", "puedo pagar", "aceptan", "metodo de pago", "método de pago"]):
+                        _resp_pregunta = "Aceptamos *efectivo*, *tarjeta* y *transferencia*. 💳\n\n"
+                    resp = (
+                        _resp_pregunta
+                        + _CATEGORIAS_PERSONALIZABLES[categoria_actual]["pregunta"]
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:], fase_pedido=fase,
+                                      carrito=carrito, notas_pedido=sesion.get("notas_pedido", ""),
+                                      extras_pedido=sesion.get("extras_pedido", []))
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Cliente preguntó algo en personalizacion:{categoria_actual} — respondido sin guardar como nota.")
+                    return
+                texto_nota = _t_strip
 
             notas_existentes = sesion.get("notas_pedido", "")
             notas_combinadas = _actualizar_nota_categoria(notas_existentes, categoria_actual, texto_nota)
@@ -2280,6 +2316,12 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         # Herramientas disponibles para el modelo
         carrito_estado = list(carrito)  # mutable dentro del turno
         extras_estado = list(sesion.get("extras_pedido", []))  # mutable dentro del turno
+        # Snapshot del carrito ANTES de procesar tools. Sirve para detectar
+        # el bug de "productos perdidos": si el LLM agrega bebidas pero por
+        # alguna razon el carrito pierde productos que NO se pidieron quitar,
+        # restauramos los faltantes. Bug real (pedido #60): cliente tenia 10
+        # tacos + especial, agrego bebidas, y los 10 tacos desaparecieron.
+        carrito_snapshot = [dict(c) for c in carrito]
 
         @tool
         def ver_menu() -> str:
@@ -2971,6 +3013,41 @@ REGLAS IMPORTANTES:
                 print(f"   [{nombre_neg}] Cliente dijo frase de cierre clara pero el LLM no llamó cerrar_pedido ni improvisó pregunta reconocible — forzando cierre de todas formas (red de seguridad).")
                 iniciar_cierre = True
                 texto_respuesta = ""
+
+        # GUARD DE INTEGRIDAD DEL CARRITO (bug pedido #60: productos perdidos)
+        # Si el carrito perdio productos que estaban en el snapshot inicial, y
+        # en este turno NO se llamo quitar_del_carrito ni se cancelo, es un
+        # error: el LLM o algun reproceso "olvido" productos. Restauramos los
+        # que falten para que el cliente no pierda lo que ya habia pedido.
+        if carrito_snapshot and not iniciar_cierre:
+            hubo_quitar = any(t in ("quitar_del_carrito", "vaciar_carrito") for t in tools_llamadas)
+            if not hubo_quitar:
+                nombres_ahora = {c["nombre"].lower() for c in carrito_estado}
+                restaurados = []
+                for prod_orig in carrito_snapshot:
+                    nom = prod_orig["nombre"].lower()
+                    if nom not in nombres_ahora:
+                        # Producto desaparecido sin quitar explicito: restaurar
+                        carrito_estado.append(dict(prod_orig))
+                        restaurados.append(prod_orig["nombre"])
+                    else:
+                        # Existe, pero verificar que no haya bajado la cantidad
+                        for c in carrito_estado:
+                            if c["nombre"].lower() == nom and c["cantidad"] < prod_orig["cantidad"]:
+                                c["cantidad"] = prod_orig["cantidad"]
+                                restaurados.append(f"{prod_orig['nombre']} (cantidad)")
+                                break
+                if restaurados:
+                    print(f"   [{nombre_neg}] GUARD INTEGRIDAD: restaurados productos perdidos sin quitar explicito: {restaurados}")
+                    # Si el guard ya habia armado una respuesta de carrito,
+                    # la regeneramos con el carrito corregido.
+                    if texto_respuesta and "Tu pedido" in texto_respuesta:
+                        _pend = [r for r in tool_results if isinstance(r, str) and "varias opciones" in r] if 'tool_results' in dir() else []
+                        texto_respuesta = (
+                            "¡Listo! Así va tu pedido:\n\n"
+                            + _formato_carrito(carrito_estado, extras=extras_estado)
+                            + "\n\n¿Algo más, o ya sería todo? 😊"
+                        )
 
         # Guardar carrito actualizado (puede haber cambiado por las tools)
         nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=texto_respuesta or "")]
