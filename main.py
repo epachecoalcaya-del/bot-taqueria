@@ -2423,8 +2423,68 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             coincidencias = _buscar_coincidencias(nombre_producto, menu)
 
             if not coincidencias:
-                nombres = ", ".join(i["nombre"] for i in menu)
-                return f"No encontré '{nombre_producto}' en el menú. Los productos disponibles son: {nombres}."
+                # Detectar el contexto de lo que pidió para dar sugerencias
+                # útiles en vez de listar todo el menú (44 productos).
+                _texto_bus = nombre_producto.lower()
+                _resp_no_encontrado = ""
+
+                # "orden de X" donde X no es una carne reconocida
+                if "orden de " in _texto_bus or _texto_bus.startswith("orden "):
+                    _ordenes_disp = (
+                        "  • Orden de Bistec — 3 tacos por $60\n"
+                        "  • Orden de Sirloin — 2 tacos por $50\n"
+                        "  • Orden de Chorizo — 3 tacos por $60\n"
+                        "  • Orden de Chorizo Argentino — 2 tacos por $50\n"
+                        "  • Orden de Campechano — 3 tacos por $65\n"
+                        "  • Orden de Pastor — 2 tacos (2x1, $26)"
+                    )
+                    _resp_no_encontrado = (
+                        f"No encontré una orden de *\"{nombre_producto}\"* en el menú 🤔\n\n"
+                        f"Las órdenes de tacos disponibles son:\n{_ordenes_disp}\n\n"
+                        f"¿Cuál te gustaría? 😊"
+                    )
+                # Palabras clave de categorías — sugerir esa categoría
+                elif any(k in _texto_bus for k in ["taco", "tacos"]):
+                    _tacos = [i for i in menu if "taco" in i["nombre"].lower()]
+                    _opciones = "\n".join(f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in _tacos)
+                    _resp_no_encontrado = f"No encontré *\"{nombre_producto}\"* 🤔 Los tacos que tenemos son:\n{_opciones}"
+                elif any(k in _texto_bus for k in ["volcan", "volcán"]):
+                    _items = [i for i in menu if "volc" in i["nombre"].lower()]
+                    _opciones = "\n".join(f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in _items)
+                    _resp_no_encontrado = f"No encontré *\"{nombre_producto}\"* 🤔 Los volcanes disponibles son:\n{_opciones}"
+                elif any(k in _texto_bus for k in ["hamburguesa", "burger"]):
+                    _items = [i for i in menu if "hamburguesa" in i["nombre"].lower()]
+                    _opciones = "\n".join(f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in _items)
+                    _resp_no_encontrado = f"No encontré *\"{nombre_producto}\"* 🤔 Las hamburguesas disponibles son:\n{_opciones}"
+                elif any(k in _texto_bus for k in ["torta", "tortas"]):
+                    _items = [i for i in menu if "torta" in i["nombre"].lower()]
+                    _opciones = "\n".join(f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in _items)
+                    _resp_no_encontrado = f"No encontré *\"{nombre_producto}\"* 🤔 Las tortas disponibles son:\n{_opciones}"
+                elif any(k in _texto_bus for k in ["agua", "refresco", "bebida", "soda"]):
+                    _items = [i for i in menu if any(k in i["nombre"].lower() for k in ["agua","refresco"])]
+                    _opciones = "\n".join(f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in _items)
+                    _resp_no_encontrado = f"No encontré *\"{nombre_producto}\"* 🤔 Las bebidas disponibles son:\n{_opciones}"
+                elif any(k in _texto_bus for k in ["quesadilla", "gringa", "juana", "sincronizada"]):
+                    _items = [i for i in menu if any(k in i["nombre"].lower() for k in ["gringa","juana","sincronizada","quesadilla"])]
+                    _opciones = "\n".join(f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in _items)
+                    _resp_no_encontrado = f"No encontré *\"{nombre_producto}\"* 🤔 Las quesadillas disponibles son:\n{_opciones}"
+                elif any(k in _texto_bus for k in ["especialidad", "especial", "alambre", "papa rellena", "que me ves", "que chingaos", "no que no"]):
+                    _items = [i for i in menu if i.get("categoria","").lower() == "especialidades" or "alambre" in i["nombre"].lower() or "papa rellena" in i["nombre"].lower() or "especial" in i["nombre"].lower()]
+                    _opciones = "\n".join(f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in _items[:8])
+                    _resp_no_encontrado = f"No encontré *\"{nombre_producto}\"* 🤔 Las especialidades disponibles son:\n{_opciones}"
+                elif any(k in _texto_bus for k in ["kilo", "kilogramo"]):
+                    _items = [i for i in menu if "kilo" in i["nombre"].lower()]
+                    _opciones = "\n".join(f"  • {i['nombre']} — {_fmt_precio(float(i['precio']))}" for i in _items)
+                    _resp_no_encontrado = f"No encontré *\"{nombre_producto}\"* 🤔 Los kilos disponibles son:\n{_opciones}"
+                else:
+                    # Sin contexto claro — respuesta genérica pero útil
+                    _resp_no_encontrado = (
+                        f"No encontré *\"{nombre_producto}\"* en el menú 🤔\n\n"
+                        f"¿Te refieres a alguna de estas categorías? "
+                        f"tacos, volcanes, hamburguesas, tortas, quesadillas, especialidades, kilos o bebidas. "
+                        f"O escribe *menú* para ver todo. 😊"
+                    )
+                return _resp_no_encontrado
 
             if len(coincidencias) > 1:
                 opciones = "\n".join(
