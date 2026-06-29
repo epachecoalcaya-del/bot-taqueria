@@ -289,6 +289,20 @@ def marcar_pago_manual(pedido_id: int):
         print(f"!!! DB error en marcar_pago_manual: {e}")
 
 
+def cambiar_pago_pendiente_a_efectivo(pedido_id: int):
+    """Cambia un pedido 'pendiente_pago' (esperando link de MP) a efectivo
+    y lo confirma directamente a cocina. Se usa cuando el cliente decide
+    pagar en efectivo después de haber generado un link de transferencia/tarjeta."""
+    try:
+        _get_client().table("pedidos_ordenes").update({
+            "estado": "nuevo",
+            "estado_pago": "pendiente",  # efectivo: pendiente hasta que el repartidor cobre
+            "metodo_pago": "Efectivo",
+        }).eq("id", pedido_id).execute()
+    except Exception as e:
+        print(f"!!! DB error en cambiar_pago_pendiente_a_efectivo: {e}")
+
+
 def confirmar_pago_pedido(pedido_id: int, payment_id: str):
     """Marca un pedido como pagado y lo pasa a estado 'nuevo' para que
     aparezca en la cocina — se llama cuando el webhook de Mercado Pago
