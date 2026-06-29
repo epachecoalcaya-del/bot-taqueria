@@ -35,6 +35,33 @@ TZ_MX = datetime.timezone(datetime.timedelta(hours=-6))
 _negocios_cache: dict = {}   # phone_number_id -> dict negocio
 _menu_cache:     dict = {}   # negocio_id -> list de items
 
+# Idempotencia: set de message_ids de WhatsApp ya procesados.
+# Meta reenvía el mismo webhook varias veces (hasta 3-4 intentos) cuando
+# el servidor tarda en responder, lo que causaba procesamiento doble:
+# doble agregado de productos, doble confirmación, salsa duplicada, etc.
+# Guardamos los últimos 500 IDs en memoria (circulares) — suficiente para
+# cubrir la ventana de reintentos de Meta (~30 segundos) sin consumir RAM.
+_WAMID_MAX = 500
+_wamid_procesados: set   = set()
+_wamid_orden:      list  = []   # para mantener tamaño máximo (FIFO)
+_wamid_lock = threading.Lock()
+
+def _ya_procesado(wamid: str) -> bool:
+    """Devuelve True si este message_id ya fue procesado (duplicado de Meta)."""
+    with _wamid_lock:
+        return wamid in _wamid_procesados
+
+def _marcar_procesado(wamid: str):
+    """Registra el message_id como procesado. Descarta los más viejos si supera el límite."""
+    with _wamid_lock:
+        if wamid in _wamid_procesados:
+            return
+        _wamid_procesados.add(wamid)
+        _wamid_orden.append(wamid)
+        if len(_wamid_orden) > _WAMID_MAX:
+            viejo = _wamid_orden.pop(0)
+            _wamid_procesados.discard(viejo)
+
 
 def _cargar_negocios():
     global _negocios_cache, _menu_cache
@@ -780,9 +807,16 @@ async def recibir_webhook(request: Request, background_tasks: BackgroundTasks):
         else:
             return {"status": "ok"}
         telefono       = msg["from"]
+        wamid          = msg.get("id", "")   # ID único del mensaje de WhatsApp
         phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
         if not phone_number_id or phone_number_id not in _negocios_cache:
             return {"status": "ok"}
+        # Idempotencia: ignorar mensajes duplicados que Meta reenvía.
+        if wamid and _ya_procesado(wamid):
+            print(f"   [Webhook] Duplicado ignorado: wamid={wamid[:20]}...")
+            return {"status": "ok"}
+        if wamid:
+            _marcar_procesado(wamid)
         background_tasks.add_task(procesar_mensaje, texto, telefono, phone_number_id, coords_ubicacion)
         return {"status": "ok"}
     except Exception as e:
