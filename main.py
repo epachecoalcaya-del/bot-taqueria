@@ -297,6 +297,84 @@ def _calcular_total(carrito: list, extras: list = None) -> float:
     return total_carrito + _calcular_total_extras(extras)
 
 
+def _normalizar_precios_desde_menu(carrito: list, menu: list) -> list:
+    """DEFENSA MASIVA CONTRA BUGS DE DINERO: recalcula el precio de cada
+    producto del carrito tomándolo del menú real, NUNCA confiando en el
+    precio guardado en la sesión. Así, aunque el LLM o un webhook corrupto
+    haya metido un precio equivocado, al mostrar/confirmar siempre se usa
+    el precio oficial del menú. Si un producto del carrito ya no existe en
+    el menú (caso raro), lo deja como está para no romper el flujo.
+    Devuelve el carrito con precios corregidos (no muta el original)."""
+    if not menu:
+        return carrito
+    precio_por_nombre = {i["nombre"].lower(): float(i["precio"]) for i in menu}
+    carrito_corregido = []
+    for item in carrito:
+        nuevo = dict(item)
+        nom = item.get("nombre", "").lower()
+        if nom in precio_por_nombre:
+            precio_oficial = precio_por_nombre[nom]
+            if abs(float(item.get("precio", 0)) - precio_oficial) > 0.01:
+                print(f"   [INTEGRIDAD-PRECIO] '{item.get('nombre')}': precio corregido "
+                      f"${item.get('precio')} → ${precio_oficial} (desde menú)")
+            nuevo["precio"] = precio_oficial
+        carrito_corregido.append(nuevo)
+    return carrito_corregido
+
+
+def _validar_invariantes_carrito(carrito: list, contexto: str = "") -> list:
+    """DEFENSA MASIVA: valida y repara invariantes del carrito que SIEMPRE
+    deben cumplirse, sin importar qué bug los haya roto. Se ejecuta tras
+    cada turno que modifica el carrito. Atrapa corrupciones que todavía no
+    sabemos que pueden ocurrir. Repara en vez de fallar (el cliente nunca
+    debe ver un error), y registra cada reparación para diagnóstico.
+
+    Invariantes verificadas:
+    1. Cantidad debe ser entero >= 1 (nunca 0, negativo, ni fraccionario)
+    2. Precio debe ser número >= 0
+    3. Nombre debe existir y no estar vacío
+    4. No debe haber líneas duplicadas del mismo producto (se fusionan)
+    """
+    if not carrito:
+        return carrito
+    reparado = []
+    vistos = {}  # nombre -> índice en `reparado` (para fusionar duplicados)
+    for item in carrito:
+        nombre = (item.get("nombre") or "").strip()
+        if not nombre:
+            print(f"   [INTEGRIDAD{(' '+contexto) if contexto else ''}] línea sin nombre descartada: {item}")
+            continue
+        # Cantidad: entero >= 1
+        try:
+            cantidad = int(item.get("cantidad", 1))
+        except (ValueError, TypeError):
+            cantidad = 1
+        if cantidad < 1:
+            print(f"   [INTEGRIDAD{(' '+contexto) if contexto else ''}] '{nombre}' cantidad inválida ({item.get('cantidad')}) → corregida a 1")
+            cantidad = 1
+        # Precio: número >= 0
+        try:
+            precio = float(item.get("precio", 0))
+        except (ValueError, TypeError):
+            precio = 0.0
+        if precio < 0:
+            precio = 0.0
+        # Fusionar duplicados del mismo producto
+        clave = nombre.lower()
+        if clave in vistos:
+            idx = vistos[clave]
+            reparado[idx]["cantidad"] += cantidad
+            print(f"   [INTEGRIDAD{(' '+contexto) if contexto else ''}] '{nombre}' duplicado fusionado (ahora {reparado[idx]['cantidad']})")
+        else:
+            nuevo = dict(item)
+            nuevo["nombre"] = nombre
+            nuevo["cantidad"] = cantidad
+            nuevo["precio"] = precio
+            vistos[clave] = len(reparado)
+            reparado.append(nuevo)
+    return reparado
+
+
 # Salsas REALES del negocio (confirmado con el dueño): solo roja y verde.
 # "verde" y "guacamole" son la MISMA salsa (dos nombres para lo mismo).
 _SALSAS_RECONOCIDAS = {
@@ -1305,6 +1383,12 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 notas_raw    = sesion.get("notas_pedido", "")
                 extras_sesion = sesion.get("extras_pedido", [])
                 costo_envio_real = sesion.get("costo_envio_calc", 0)
+                # DEFENSA FINAL ANTES DE COBRAR: validar invariantes y
+                # recalcular precios desde el menú. Es la última línea antes
+                # de generar el pedido real, así que aquí un precio o cantidad
+                # corrupta se corrige definitivamente.
+                carrito = _validar_invariantes_carrito(carrito, contexto="al-confirmar")
+                carrito = _normalizar_precios_desde_menu(carrito, menu)
                 total        = _calcular_total(carrito, extras_sesion)
                 total_con_envio = total + (costo_envio_real if tipo_entrega == "envio" else 0)
 
@@ -3203,6 +3287,16 @@ REGLAS IMPORTANTES:
                             + _formato_carrito(carrito_estado, extras=extras_estado)
                             + "\n\n¿Algo más, o ya sería todo? 😊"
                         )
+
+        # VALIDACIÓN DE INVARIANTES + NORMALIZACIÓN DE PRECIOS (defensa masiva)
+        # Antes de mostrar/guardar el carrito, lo pasamos por dos validadores
+        # que SIEMPRE corren: reparan cantidades/precios inválidos, fusionan
+        # duplicados, y recalculan los precios desde el menú oficial. Esto
+        # atrapa corrupciones que todavía no sabemos que pueden pasar y hace
+        # imposible cobrar un precio equivocado.
+        if carrito_estado:
+            carrito_estado = _validar_invariantes_carrito(carrito_estado, contexto="post-turno")
+            carrito_estado = _normalizar_precios_desde_menu(carrito_estado, menu)
 
         # Si el turno agregó productos, ahora construimos la respuesta del
         # carrito AQUÍ, después del guard de integridad, para que cualquier
