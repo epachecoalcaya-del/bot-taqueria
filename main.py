@@ -1140,6 +1140,42 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             print(f"   [{nombre_neg}] Fuera de horario — mensaje de cerrado enviado.")
             return
 
+        # ── GUARD: PEDIDO PENDIENTE_PAGO + CLIENTE QUIERE CAMBIAR A EFECTIVO ──
+        # Si el cliente ya había confirmado y se generó un link de pago
+        # (Mercado Pago), pero luego dice que prefiere efectivo — la sesión
+        # ya está vacía (fase=inicio, carrito=[]) pero el pedido sigue en DB
+        # con estado 'pendiente_pago'. Bug real (pedido #62): el cliente tuvo
+        # que repetir TODO el pedido desde cero. Ahora detectamos ese caso,
+        # cambiamos el método de pago a efectivo y confirmamos directamente.
+        if not carrito and fase == "inicio":
+            _FRASES_CAMBIO_EFECTIVO = [
+                "mejor efectivo", "mejor en efectivo", "pago en efectivo",
+                "prefiero efectivo", "efectivo mejor", "mejor pago en efectivo",
+                "no mejor efectivo", "no, mejor efectivo", "cambio a efectivo",
+                "mejor lo pago en efectivo", "pagare en efectivo", "pagaré en efectivo",
+            ]
+            _quiere_efectivo = any(f in texto_low for f in _FRASES_CAMBIO_EFECTIVO)
+            if _quiere_efectivo:
+                _pedido_pendiente = db.buscar_pedido_cancelable(negocio_id, telefono)
+                if _pedido_pendiente and _pedido_pendiente.get("estado") == "pendiente_pago":
+                    _pid = _pedido_pendiente["id"]
+                    db.cambiar_pago_pendiente_a_efectivo(_pid)
+                    _items_str = _pedido_pendiente.get("items_resumen", "")
+                    _total = _pedido_pendiente.get("total", 0)
+                    _nombre_cl = _pedido_pendiente.get("nombre_cliente", "")
+                    resp = (
+                        f"✅ ¡Listo! Cambié el método de pago a *efectivo*.\n\n"
+                        f"📋 *Pedido #{_pid} confirmado*\n"
+                        f"👤 {_nombre_cl}\n"
+                        f"💰 Total: ${_total:.0f} (pagas al recibir)\n\n"
+                        f"¡Tu pedido ya está en preparación! 🌮"
+                    )
+                    nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=resp)]
+                    db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:])
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"   [{nombre_neg}] Pedido #{_pid} cambió de pago online a efectivo — confirmado a cocina.")
+                    return
+
         # ── CAPTURA DE UBICACIÓN GPS — RED DE SEGURIDAD ─────────────────────
         # Si el cliente comparte su ubicación real de WhatsApp pero el flujo
         # determinístico NO está en fase "direccion" (ej. el LLM, en modo
@@ -1461,7 +1497,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             # Limpiar prefijos conversacionales que no son parte del nombre
             # Ej: "ok Mario" -> "Mario", "oye soy Ana" -> "Ana"
             _texto_limpio = texto.strip()
-            for _prefijo in ["ok ", "okay ", "oye ", "oye, ", "soy ", "me llamo ", "mi nombre es "]:
+            for _prefijo in ["ok ", "okay ", "oye ", "oye, ", "soy ", "me llamo ", "mi nombre es ", "a nombre de ", "el nombre es ", "mi nombre ", "nombre: ", "nombre es "]:
                 if _texto_limpio.lower().startswith(_prefijo):
                     _texto_limpio = _texto_limpio[len(_prefijo):]
                     break
@@ -2718,6 +2754,9 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
 
         sistema = f"""Eres el asistente de pedidos de {nombre_neg}, una taquería que atiende por WhatsApp.
 Tu trabajo es tomar el pedido del cliente de forma amigable y precisa.
+
+LÍMITE DE ROL — MUY IMPORTANTE:
+Eres un asistente de PEDIDOS DE COMIDA, nada más. Si el cliente habla de temas que no tienen nada que ver con el pedido o el restaurante (vida personal, salud, relaciones, política, deportes, chismes, consejos emocionales, recomendaciones médicas, etc.), responde brevemente con amabilidad y redirige al menú. Ejemplo: "Jaja, me alegra platicar pero mi especialidad son los tacos 🌮 ¿Te puedo ayudar con algo del menú?" NO des consejos médicos, emocionales, de relaciones, ni opines sobre deportes, política o cualquier tema personal. Si el cliente dice algo sin relación al pedido, una respuesta breve y amable es suficiente — luego redirige. Tampoco te ofrezcas como "amigo" ni para "acompañarles" — eres un bot de taquería.
 
 Horarios: {horarios or 'Consultar con el negocio.'}
 Tipos de servicio disponibles: {tipo_servicio}
