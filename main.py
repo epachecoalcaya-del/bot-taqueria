@@ -1285,7 +1285,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         # con estado 'pendiente_pago'. Bug real (pedido #62): el cliente tuvo
         # que repetir TODO el pedido desde cero. Ahora detectamos ese caso,
         # cambiamos el método de pago a efectivo y confirmamos directamente.
-        if not carrito and fase == "inicio":
+        if not carrito and not fase:
             _FRASES_CAMBIO_EFECTIVO = [
                 "mejor efectivo", "mejor en efectivo", "pago en efectivo",
                 "prefiero efectivo", "efectivo mejor", "mejor pago en efectivo",
