@@ -1045,6 +1045,26 @@ def procesar_mensaje(texto: str, telefono: str, phone_number_id: str, coords_ubi
         if not adquirido:
             print(f"!!! No se pudo adquirir el candado para {telefono} en 30s, procesando de todas formas.")
         _procesar_mensaje_interno(texto, telefono, phone_number_id, coords_ubicacion)
+    except Exception as e:
+        # RED DE SEGURIDAD FINAL: si algo falla de forma no manejada (OpenAI
+        # caído, error de DB, bug nuevo), el cliente NUNCA debe quedarse en
+        # visto sin respuesta. Le mandamos un mensaje amable de fallback.
+        # Bug de imagen real: un error tragado dejaba al cliente esperando
+        # sin saber qué pasó, pensando que lo ignoraron.
+        import traceback
+        print(f"!!! Error NO MANEJADO en procesar_mensaje: {e}\n{traceback.format_exc()}")
+        try:
+            neg = _negocios_cache.get(phone_number_id)
+            if neg:
+                _tok = neg.get("whatsapp_token", "")
+                _fallback = (
+                    "Uy, tuve un problemita técnico procesando tu mensaje 😅 "
+                    "¿Me lo puedes repetir, por favor? Si sigue fallando, "
+                    "en un momento te atendemos."
+                )
+                enviar_whatsapp(telefono, _fallback, _tok, phone_number_id)
+        except Exception as e2:
+            print(f"!!! Falló incluso el mensaje de fallback: {e2}")
     finally:
         if adquirido:
             candado.release()
@@ -1086,6 +1106,12 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
         sesion  = db.cargar_sesion(llave)
         historial  = sesion["historial"]
         carrito    = sesion["carrito"] or []
+        # Validar invariantes del carrito al CARGAR (no solo al guardar): si
+        # una sesión anterior dejó un carrito corrupto (cantidad 0, duplicados,
+        # precio raro), lo reparamos antes de procesar este turno. Defensa en
+        # ambos extremos del turno.
+        if carrito:
+            carrito = _validar_invariantes_carrito(carrito, contexto="al-cargar")
         fase       = sesion["fase_pedido"] or ""
         texto_low  = texto.lower().strip()
 
@@ -2961,6 +2987,8 @@ REGLAS IMPORTANTES:
             model="gpt-4o-mini",
             temperature=0,
             api_key=os.getenv("OPENAI_API_KEY"),
+            timeout=20,       # corta a los 20s si OpenAI se cuelga
+            max_retries=1,    # un reintento rápido ante error de red transitorio
         ).bind_tools(tools)
 
         msgs_llm = [SystemMessage(content=sistema)] + historial[-MAX_HISTORIAL:] + [HumanMessage(content=texto)]
@@ -3201,7 +3229,8 @@ REGLAS IMPORTANTES:
                 for i, tc in enumerate(resp_llm.tool_calls):
                     msgs_2.append(ToolMessage(content=tool_results[i], tool_call_id=tc["id"]))
                 resp_2 = ChatOpenAI(model="gpt-4o-mini", temperature=0,
-                                    api_key=os.getenv("OPENAI_API_KEY")).invoke(msgs_2)
+                                    api_key=os.getenv("OPENAI_API_KEY"),
+                                    timeout=20, max_retries=1).invoke(msgs_2)
                 texto_respuesta = resp_2.content.strip()
         elif not _cerrar_desde_armando:
             texto_respuesta = resp_llm.content.strip()
@@ -3523,9 +3552,25 @@ REGLAS IMPORTANTES:
             print(f"<- [{nombre_neg}] {texto_respuesta[:80]}")
             enviar_whatsapp(telefono, texto_respuesta, token, phone_number_id)
 
+        # SNAPSHOT ESTRUCTURADO DEL CARRITO (diagnóstico instantáneo).
+        # Si el carrito cambió en este turno, registramos su estado final
+        # de forma compacta: total e items. Esto permite ver de un vistazo
+        # en los logs de Render si un turno corrompió el carrito, sin tener
+        # que reconstruir mentalmente lo que pasó a partir de screenshots.
+        try:
+            if carrito_estado:
+                _items_log = ", ".join(f"{c['cantidad']}x{c['nombre']}" for c in carrito_estado)
+                _total_log = _calcular_total(carrito_estado, extras_estado if 'extras_estado' in dir() else [])
+                print(f"   [CARRITO] {telefono} | total=${_total_log:.0f} | {_items_log}")
+        except Exception:
+            pass  # el log de diagnóstico nunca debe romper el flujo
+
     except Exception as e:
         import traceback
         print(f"!!! Error en procesar_mensaje: {e}\n{traceback.format_exc()}")
+        # Re-lanzamos para que el wrapper procesar_mensaje() envíe el mensaje
+        # de fallback al cliente (no debe quedarse en visto sin respuesta).
+        raise
 
 
 # ── PANEL ADMIN ──────────────────────────────────────────────────────────────
