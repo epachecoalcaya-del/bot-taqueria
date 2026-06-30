@@ -288,8 +288,20 @@ def _extraer_pago_de_notas(notas_raw: str) -> tuple:
 
 
 def _calcular_total_extras(extras: list) -> float:
-    """Suma el costo de todos los ingredientes extra ($15 c/u)."""
-    return sum(_VALOR_EXTRA * e.get("cantidad", 1) for e in (extras or []))
+    """Suma el costo de todos los ingredientes extra ($15 c/u).
+    Blinda la cantidad contra tipos corruptos (string, None, negativos):
+    igual que el carrito, un extra malformado no debe crashear el cálculo
+    del total y tirar todo el flujo de confirmación."""
+    total = 0.0
+    for e in (extras or []):
+        try:
+            cant = int(e.get("cantidad", 1))
+        except (ValueError, TypeError):
+            cant = 1
+        if cant < 1:
+            cant = 1
+        total += _VALOR_EXTRA * cant
+    return total
 
 
 def _calcular_total(carrito: list, extras: list = None) -> float:
@@ -382,6 +394,19 @@ _SALSAS_RECONOCIDAS = {
     "verde": "salsa verde", "guacamole": "salsa verde",
 }
 
+# Frases que significan "quiero las DOS salsas (roja y verde)".
+# CENTRALIZADO aquí para que el parser y la lógica de avance usen EXACTAMENTE
+# la misma lista — antes estaban duplicadas en dos lugares y se
+# desincronizaron, causando que "De la dos" pasara el parser pero la lógica
+# de avance pidiera aclarar la salsa de nuevo (bug real en producción).
+# Incluye errores de tipeo comunes ("la dos" sin s) porque los clientes
+# escriben rápido en WhatsApp.
+_FRASES_AMBAS_SALSAS = [
+    "ambas", "las dos", "los dos", "las 2", "los 2", "ambas salsas",
+    "de las dos", "la dos", "lo dos", "de la dos", "de lo dos",
+    "las dos salsas", "ambas dos", "dos salsas", "2 salsas",
+]
+
 # La PIÑA NO es salsa, es un complemento incluido (sin costo extra). Se
 # reconoce aparte para anotarla como complemento, no como salsa. Si el
 # cliente dice "verde y piña" quiere salsa verde + piña de complemento.
@@ -405,7 +430,9 @@ def _parsear_salsa_verdura(texto_low: str) -> tuple:
         nombre for clave, nombre in _COMPLEMENTOS_RECONOCIDOS.items() if clave in texto_low
     })
     # "ambas", "las dos", "los dos" = quiere roja Y verde
-    ambas_salsas = any(p in texto_low for p in ["ambas", "las dos", "los dos", "las 2", "los 2", "ambas salsas", "de las dos"])
+    # Usa la lista centralizada _FRASES_AMBAS_SALSAS (compartida con la
+    # lógica de avance) para que ambos lugares reconozcan exactamente lo mismo.
+    ambas_salsas = any(p in texto_low for p in _FRASES_AMBAS_SALSAS)
     if ambas_salsas:
         salsas_elegidas = ["salsa roja", "salsa verde"]
 
@@ -757,6 +784,20 @@ def _normalizar_txt(s: str) -> str:
 _PALABRAS_RELLENO = {"de", "del", "la", "el", "los", "las", "un", "una", "unos", "unas"}
 
 
+def _contiene_palabra(texto_low: str, palabras) -> bool:
+    """Verifica si el texto contiene ALGUNA de las palabras como PALABRA
+    COMPLETA, no como substring. Evita bugs graves de coincidencia parcial:
+    sin el chequeo de palabra completa, 'si' coincidía dentro de 'sin',
+    'casi', 'siempre', 'necesito' — haciendo que 'sin cebolla' se
+    interpretara como un 'SÍ' de confirmación. Usa límites de palabra para
+    cada término (escapando regex). Las frases de varias palabras se buscan
+    tal cual (con límites en los extremos)."""
+    for p in palabras:
+        if re.search(r'\b' + re.escape(p) + r'\b', texto_low):
+            return True
+    return False
+
+
 def _quitar_relleno(s: str) -> str:
     """Quita palabras de relleno (de, un, la, etc.) de un texto ya
     normalizado. Solo se usa como ULTIMO recurso de busqueda — varios
@@ -972,6 +1013,13 @@ def procesar_webhook_pago(payment_id: str):
 
         pedido_id = pedido["id"]
         estado_mp = info.get("status")
+
+        # IDEMPOTENCIA DE PAGOS: Mercado Pago reenvía webhooks (igual que Meta).
+        # Si este pedido YA está pagado/en cocina, no lo procesamos de nuevo —
+        # evita confirmar dos veces al cliente y duplicar el pedido en cocina.
+        if pedido.get("estado_pago") == "pagado" or pedido.get("estado") in ("nuevo", "en_proceso", "listo", "entregado"):
+            print(f"   [Pagos] Pedido #{pedido_id} ya estaba procesado (estado={pedido.get('estado')}, pago={pedido.get('estado_pago')}) — webhook duplicado ignorado.")
+            return
 
         if estado_mp == "approved":
             db.confirmar_pago_pedido(pedido_id, payment_id)
@@ -1402,7 +1450,24 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
 
         # FASE: confirmando — el cliente responde SI/NO al resumen del pedido
         if fase == "confirmando":
-            if any(p in texto_low for p in ["si", "sí", "confirmo", "dale", "va", "ok", "correcto", "listo"]):
+            # CRÍTICO: usamos _contiene_palabra (palabra completa), NO substring.
+            # Bug real: "si" coincidía dentro de "sin", "casi", "necesito", así
+            # que "sin cebolla" o "necesito cambiar" se tomaban como SÍ y
+            # confirmaban el pedido sin que el cliente lo aprobara.
+            # Evaluamos NEGACIÓN PRIMERO: si el cliente quiere cambiar/cancelar
+            # o dice "no", eso gana sobre cualquier "sí" que también aparezca.
+            _quiere_modificar = _contiene_palabra(texto_low, [
+                "no", "cancela", "cancelar", "cambiar", "cambia", "modificar",
+                "modifica", "error", "esperar", "espera", "quita", "quitar",
+                "agrega", "agregar", "menos", "mejor",
+            ])
+            _confirma = _contiene_palabra(texto_low, [
+                "si", "sí", "sip", "simon", "confirmo", "confirmar", "confirmado",
+                "dale", "va", "vale", "ok", "okay", "okey", "correcto", "listo",
+                "perfecto", "esta bien", "está bien", "asi esta bien", "así está bien",
+                "adelante", "afirmativo", "claro",
+            ])
+            if _confirma and not _quiere_modificar:
                 tipo_entrega = sesion["tipo_entrega"]
                 nombre_cl    = sesion["nombre_cliente"]
                 direccion    = sesion["direccion_entrega"]
@@ -1503,6 +1568,21 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                     metodo_pago=metodo_pago_usado,
                     extras_pedido=extras_sesion,
                 )
+                # CRÍTICO: si el pedido NO se guardó (error de DB), pedido_id
+                # es None. NUNCA debemos decirle al cliente "Pedido #None
+                # confirmado, ya está en preparación" cuando en realidad la
+                # cocina nunca lo verá. Avisamos del problema y NO limpiamos
+                # la sesión, para que el cliente pueda reintentar sin perder
+                # su pedido.
+                if not pedido_id:
+                    resp = (
+                        "Uy, tuve un problema al registrar tu pedido 😣 "
+                        "Por favor intenta confirmar de nuevo en un momento. "
+                        "Si sigue fallando, escríbenos directo para ayudarte."
+                    )
+                    enviar_whatsapp(telefono, resp, token, phone_number_id)
+                    print(f"!!! [{nombre_neg}] guardar_pedido devolvió None (efectivo) — NO se confirmó al cliente.")
+                    return
                 tiempo = tiempo_env if tipo_entrega == "envio" else tiempo_rec
                 notas_linea = f"📝 {notas}\n" if notas else ""
                 pago_linea = f"💳 Pago: *{metodo_pago_usado}*\n" if metodo_pago_usado else ""
@@ -1542,7 +1622,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 print(f"   [{nombre_neg}] Pedido #{pedido_id} confirmado — {nombre_cl} / ${total_con_envio:.2f}")
                 return
 
-            elif any(p in texto_low for p in ["no", "cancel", "cambiar", "modificar", "error"]):
+            elif _quiere_modificar:
                 resp = (
                     "Sin problema. ¿Qué quieres hacer?\n\n"
                     "1️⃣ *Agregar* un producto\n"
@@ -1669,12 +1749,18 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
             texto_lower_n = texto.lower().strip(".,!¡¿? ")
             # "vale" solo cuenta como no-nombre si vino en minusculas
             _vale_es_confirmacion = texto_lower_n == "vale" and texto.strip() == texto.strip().lower()
+            # Las frases no-nombre se comparan con límites de palabra (no
+            # substring) para no rechazar nombres que las contengan por
+            # accidente. Riesgo bajo pero lo cerramos por consistencia.
+            _contiene_frase_no_nombre = any(
+                re.search(rf"\b{re.escape(f)}\b", texto_lower_n) for f in _NO_ES_NOMBRE_FRASES
+            )
             es_nombre_valido = (
                 len(nombre_cl) >= 2
                 and not any(c.isdigit() for c in nombre_cl)
                 and texto_lower_n not in _NO_ES_NOMBRE_PALABRAS
                 and not _vale_es_confirmacion
-                and not any(f in texto_lower_n for f in _NO_ES_NOMBRE_FRASES)
+                and not _contiene_frase_no_nombre
                 and len(nombre_cl.split()) <= 4
             )
             if es_nombre_valido:
@@ -2075,7 +2161,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                                   extras_pedido=extras_sesion)
                 enviar_whatsapp(telefono, resp_retry, token, phone_number_id)
                 return
-            elif not any(k in texto_low for k in list(_SALSAS_RECONOCIDAS.keys()) + ["ninguna", "sin salsa", "ambas", "las dos", "los dos", "las 2", "los 2", "2 salsas", "dos salsas"]):
+            elif not any(k in texto_low for k in list(_SALSAS_RECONOCIDAS.keys()) + ["ninguna", "sin salsa"] + _FRASES_AMBAS_SALSAS):
                 # Respondió con todo/aparte/piña pero SIN elegir salsa.
                 # Guardamos lo que dijo usando el helper que REEMPLAZA
                 # (no acumula) — así cada reintento sobreescribe el anterior.
@@ -2416,7 +2502,15 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
 
         # FASE: tipo — esperando si es para recoger o envío
         if fase == "tipo":
-            if any(p in texto_low for p in ["recoger", "local", "paso", "voy", "ahi voy"]):
+            # IMPORTANTE: evaluamos envío PRIMERO y con prioridad. Bug real:
+            # "voy a pedir a domicilio" contiene "voy" (señal de recoger) Y
+            # "domicilio" (señal de envío). Si recoger gana, al cliente que
+            # quiere envío nunca le piden dirección. Por eso: si el mensaje
+            # menciona domicilio/envío, es envío — sin importar que también
+            # tenga palabras genéricas como "voy" o "paso".
+            _dice_envio = any(p in texto_low for p in ["envio", "envío", "domicilio", "mandar", "manden", "mandes", "enviad", "enviar", "delivery", "a casa", "mi casa", "mi direccion", "mi dirección"])
+            _dice_recoger = any(p in texto_low for p in ["recoger", "recojo", "en el local", "en local", "paso por", "yo paso", "ahi voy", "ahí voy", "para llevar", "lo llevo", "yo llevo"])
+            if _dice_recoger and not _dice_envio:
                 if tipo_servicio == "envio":
                     resp = "Solo manejamos envío a domicilio. ¿Me das tu dirección de entrega?"
                     db.guardar_sesion(llave, historial, fase_pedido="direccion",
@@ -2434,7 +2528,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 enviar_whatsapp(telefono, resp, token, phone_number_id)
                 return
 
-            elif any(p in texto_low for p in ["envio", "envío", "domicilio", "llevar", "lleva", "mandar", "delivery"]):
+            elif _dice_envio:
                 if tipo_servicio == "recoger":
                     resp = "Solo manejamos recolección en el local. ¿A qué nombre registramos tu pedido?"
                     db.guardar_sesion(llave, historial, fase_pedido="nombre",
