@@ -525,9 +525,10 @@ async def panel_menu_agregar(
     negocio = _neg(phone_id)
     if not negocio or not _auth(negocio, pwd):
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
-    from main import _menu_cache
+    from main import _menu_cache, _menu_cache_ts
     exito = db.agregar_item_menu(negocio["id"], nombre, precio, descripcion, categoria)
     _menu_cache[negocio["id"]] = db.cargar_menu(negocio["id"])
+    _menu_cache_ts[negocio["id"]] = __import__("time").time()
     msg = "ok" if exito else "duplicado"
     return RedirectResponse(f"/admin/{phone_id}/menu?pwd={pwd}&msg={msg}", status_code=303)
 
@@ -542,9 +543,10 @@ async def panel_menu_editar(
     negocio = _neg(phone_id)
     if not negocio or not _auth(negocio, pwd):
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
-    from main import _menu_cache
+    from main import _menu_cache, _menu_cache_ts
     exito = db.actualizar_item_menu(item_id, nombre, precio, descripcion, categoria, disponible)
     _menu_cache[negocio["id"]] = db.cargar_menu(negocio["id"])
+    _menu_cache_ts[negocio["id"]] = __import__("time").time()
     msg = "editado" if exito else "duplicado"
     return RedirectResponse(f"/admin/{phone_id}/menu?pwd={pwd}&msg={msg}", status_code=303)
 
@@ -554,9 +556,13 @@ async def panel_menu_eliminar(phone_id: str, pwd: str = "", item_id: int = Form(
     negocio = _neg(phone_id)
     if not negocio or not _auth(negocio, pwd):
         return RedirectResponse(f"/admin/{phone_id}?pwd={pwd}")
-    from main import _menu_cache
-    db.eliminar_item_menu(item_id)
+    from main import _menu_cache, _menu_cache_ts
+    ok = db.eliminar_item_menu(item_id)
+    # Recargamos el cache Y reseteamos su timestamp para que _obtener_menu
+    # tome esta versión fresca de inmediato (no espere el TTL).
     _menu_cache[negocio["id"]] = db.cargar_menu(negocio["id"])
+    _menu_cache_ts[negocio["id"]] = __import__("time").time()
+    print(f"   [Panel] Eliminar item #{item_id}: {'OK' if ok else 'FALLÓ'}. Menú recargado ({len(_menu_cache[negocio['id']])} items).")
     return RedirectResponse(f"/admin/{phone_id}/menu?pwd={pwd}", status_code=303)
 
 
