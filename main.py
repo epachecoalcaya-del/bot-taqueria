@@ -34,6 +34,26 @@ TZ_MX = datetime.timezone(datetime.timedelta(hours=-6))
 # Cache de negocios en memoria (se carga al arrancar)
 _negocios_cache: dict = {}   # phone_number_id -> dict negocio
 _menu_cache:     dict = {}   # negocio_id -> list de items
+_menu_cache_ts:  dict = {}   # negocio_id -> timestamp de última carga
+_MENU_TTL_SEG = 60           # recargar el menú desde la DB si pasó más de 1 min
+
+def _obtener_menu(negocio_id: int) -> list:
+    """Devuelve el menú del negocio, recargándolo de la DB si el cache tiene
+    más de _MENU_TTL_SEG segundos. Esto mantiene al bot sincronizado con los
+    cambios que el dueño hace en el panel (agregar/editar/eliminar productos)
+    sin necesidad de reiniciar el servicio. Bug real: se borró 'Refresco
+    Vidrio' en el panel pero el bot lo seguía mostrando porque el cache solo
+    se cargaba al arrancar. Ante error de DB, conserva el cache anterior."""
+    import time as _time
+    ahora = _time.time()
+    ultima = _menu_cache_ts.get(negocio_id, 0)
+    if (ahora - ultima) > _MENU_TTL_SEG or negocio_id not in _menu_cache:
+        try:
+            _menu_cache[negocio_id] = db.cargar_menu(negocio_id)
+            _menu_cache_ts[negocio_id] = ahora
+        except Exception as e:
+            print(f"!!! Error recargando menú {negocio_id}, usando cache previo: {e}")
+    return _menu_cache.get(negocio_id, [])
 
 # Idempotencia: set de message_ids de WhatsApp ya procesados.
 # Meta reenvía el mismo webhook varias veces (hasta 3-4 intentos) cuando
@@ -65,11 +85,13 @@ def _marcar_procesado(wamid: str):
 
 def _cargar_negocios():
     global _negocios_cache, _menu_cache
+    import time as _time
     negocios = db.cargar_negocios()
     for n in negocios:
         pid = n["phone_number_id"]
         _negocios_cache[pid] = n
         _menu_cache[n["id"]] = db.cargar_menu(n["id"])
+        _menu_cache_ts[n["id"]] = _time.time()
     print(f"[Startup] {len(_negocios_cache)} negocio(s) cargado(s).")
 
 
@@ -1136,7 +1158,7 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
 
         nombre_neg    = negocio["nombre"]
         token         = negocio["whatsapp_token"]
-        menu          = _menu_cache.get(negocio_id, [])
+        menu          = _obtener_menu(negocio_id)
         email_notif   = negocio.get("email_notificaciones", "")
         tipo_servicio = negocio.get("tipo_servicio", "ambos")
         pedido_min    = float(negocio.get("pedido_minimo") or 0)
@@ -3017,6 +3039,8 @@ LÍMITE DE ROL — MUY IMPORTANTE:
 Eres un asistente de PEDIDOS DE COMIDA. Tu trabajo es ayudar con TODO lo relacionado al restaurante: tomar pedidos, explicar el menú, dar RECOMENDACIONES y sugerencias de platillos, resolver dudas de precios, ingredientes, promociones, tiempos, envío, formas de pago, etc. Con esto eres siempre servicial y entusiasta.
 
 Cuando el cliente pida una recomendación o sugerencia ("¿qué me recomiendas?", "¿qué me sugieres?", "¿cuál es tu especialidad?", "¿qué está rico?", "no sé qué pedir"), NUNCA lo trates como charla fuera de tema: es una pregunta legítima del negocio. Sugiere con gusto platillos concretos del menú (por ejemplo las especialidades de la casa o las promociones), y pregunta si quiere ordenar alguno.
+
+NUNCA INVENTES INGREDIENTES NI DESCRIPCIONES. Solo puedes decir qué lleva un platillo si esa información está EXPLÍCITAMENTE en la herramienta info_producto o en la descripción del menú. Si no la tienes, NO la inventes — un error real fue decir que la Gringa "lleva tortilla de maíz y queso" y que el pastor viene "con salsa de guacamole, roja o de piña" sin que eso estuviera confirmado. Al recomendar, menciona los platillos por su NOMBRE y su precio (esos sí los tienes), y si el cliente quiere saber qué lleva alguno, usa info_producto para consultarlo — no adivines. Es mucho mejor decir "¿quieres que te diga qué lleva?" que inventar ingredientes.
 
 SOLO redirige brevemente cuando el cliente hable de temas GENUINAMENTE ajenos al restaurante: su vida personal, salud, relaciones sentimentales, política, deportes, pedirte que seas su amigo, consejos médicos o emocionales. En esos casos responde algo breve y amable y regresa al menú, por ejemplo: "Jaja, me alegra platicar pero mi especialidad son los tacos 🌮 ¿Te puedo ayudar con algo del menú?" NO des consejos médicos, emocionales, de relaciones, ni opines sobre deportes o política. Tampoco te ofrezcas como "amigo". Ante la duda de si algo es del restaurante o no, asume que SÍ y ayuda con gusto.
 
