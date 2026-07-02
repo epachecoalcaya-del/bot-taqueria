@@ -1384,6 +1384,46 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                     print(f"   [{nombre_neg}] Pedido #{_pid} cambió de pago online a efectivo — confirmado a cocina.")
                     return
 
+        # ── GUARD: RECOMENDACIÓN DETERMINÍSTICA ─────────────────────────────
+        # Cuando el cliente pide una recomendación en fase inicio, respondemos
+        # con CÓDIGO usando solo nombres y precios REALES del menú, en vez de
+        # dejar que el LLM redacte (gpt-4o-mini inventa ingredientes: dijo que
+        # la Gringa "lleva tortilla de maíz y queso" y el pastor viene "con
+        # salsa de guacamole, roja o de piña" — todo alucinado). Aquí no hay
+        # forma de inventar: solo mostramos platillos que existen en el menú.
+        if not carrito and not fase:
+            _t_rec = texto_low.strip(".,!¡¿? ")
+            _pide_recomendacion = any(
+                re.search(rf"\b{re.escape(p)}\b", _t_rec) for p in [
+                    "recomiendas", "recomienda", "recomiendes", "recomendacion",
+                    "recomendación", "sugieres", "sugiere", "sugieras", "sugerencia",
+                    "que me das", "que esta rico", "qué está rico", "que esta bueno",
+                    "no se que pedir", "no sé qué pedir", "que pido", "qué pido",
+                    "que es lo mejor", "especialidad de la casa", "mas pedido",
+                    "más pedido", "lo mas rico", "lo más rico",
+                ]
+            )
+            if _pide_recomendacion:
+                # Elegimos hasta 3 especialidades reales del menú + destacamos
+                # las promociones de tacos (datos 100% reales, sin inventar).
+                _especialidades = [i for i in menu if i.get("categoria", "").lower() in ("especialidades", "especialidad")]
+                _sugerencias = _especialidades[:3] if _especialidades else menu[:3]
+                _lineas_sug = "\n".join(
+                    f"  • *{i['nombre']}* — {_fmt_precio(float(i['precio']))}"
+                    for i in _sugerencias
+                )
+                _resp_rec = (
+                    "¡Con gusto! 😊 Estos son de los favoritos de la casa:\n\n"
+                    f"{_lineas_sug}\n\n"
+                    "Y nuestros *Tacos de Pastor* al 2x1 siempre son un éxito 🌮\n\n"
+                    "¿Te gustaría ordenar alguno? Si quieres saber qué lleva alguno, dime cuál y con gusto te digo. 😊"
+                )
+                nuevo_h = historial + [HumanMessage(content=texto), AIMessage(content=_resp_rec)]
+                db.guardar_sesion(llave, nuevo_h[-MAX_HISTORIAL:])
+                enviar_whatsapp(telefono, _resp_rec, token, phone_number_id)
+                print(f"   [{nombre_neg}] Recomendación determinística enviada (sin LLM, sin alucinación).")
+                return
+
         # ── CAPTURA DE UBICACIÓN GPS — RED DE SEGURIDAD ─────────────────────
         # Si el cliente comparte su ubicación real de WhatsApp pero el flujo
         # determinístico NO está en fase "direccion" (ej. el LLM, en modo
