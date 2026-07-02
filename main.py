@@ -2257,6 +2257,26 @@ def _procesar_mensaje_interno(texto: str, telefono: str, phone_number_id: str, c
                 for p in ["recoger", "a domicilio", "domicilio", "para llevar",
                           "cancelar", "efectivo", "tarjeta", "transferencia"]
             )
+            # También detectamos frases de "avanzar/cerrar" que el cliente
+            # usa cuando quiere seguir SIN personalizar. Bug real: el cliente
+            # respondió "Cerrar pedido" a la pregunta de personalización del
+            # alambre, y se guardó como nota absurda ("Especialidades: Cerrar
+            # pedido") que la cocina no puede interpretar. Estas frases
+            # significan "déjalo con todo y sigue", no son una personalización.
+            _FRASES_AVANZAR_PERS = [
+                "cerrar pedido", "cerrar", "continuar", "continua", "continúa",
+                "seguir", "sigue", "avanzar", "avanza", "listo", "es todo",
+                "eso es todo", "ya es todo", "seria todo", "sería todo",
+                "nada mas", "nada más", "asi esta bien", "así está bien",
+                "esta bien", "está bien", "ya",
+            ]
+            _quiere_avanzar_pers = any(
+                re.search(rf"\b{re.escape(p)}\b", _t_pers) for p in _FRASES_AVANZAR_PERS
+            )
+            # Solo tratamos como "avanzar" si NO menciona ingredientes ni salsa
+            # (para no pisar respuestas legítimas como "con todo listo").
+            if _quiere_avanzar_pers and not _parsear_salsa_verdura(texto_low)[0]:
+                _es_palabra_fase = True
             if _es_palabra_fase and not _parsear_salsa_verdura(texto_low)[0]:
                 # Guardamos la categoria actual con valor por defecto y
                 # marcamos que el cliente ya dijo algo del cierre, para que
